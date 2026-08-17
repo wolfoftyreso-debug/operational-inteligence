@@ -107,10 +107,16 @@ Demo-inloggning efter seed:
 Utan seed: registrera en ny organisation direkt i inloggningsvyn.
 
 ```bash
-npm test          # bygger + kör testsviten (vertikala slicen end-to-end)
+npm test          # bygger + kör testsviten (28 tester)
+npm run e2e       # end-to-end-resa i Chromium mot en körande server (25 steg)
 npm run analyze   # kör om analysen för alla organisationer (t.ex. från cron)
 npm run dev       # utvecklingsläge via tsx
 ```
+
+Drift och arkitekturbeslut: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) (komplett
+applikationskontrakt; miljöspecifika val är markerade `[INSPECT ENV]` eftersom
+Kubernetes-miljön inte kunde inspekteras från utvecklingssessionen) och
+[`docs/ADR.md`](docs/ADR.md).
 
 ## Arkitektur
 

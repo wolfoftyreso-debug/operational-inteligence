@@ -188,8 +188,43 @@
 
   // ---------- dashboard ----------
 
+  function opportunityCard(o) {
+    const detail = h('div', { style: 'display:none;margin-top:10px' },
+      h('div', { class: 'evidence-item derived' },
+        h('div', { class: 'e-label' }, 'VARFÖR SYSTEMET TYCKER DETTA ÄR INTRESSANT'),
+        h('div', { class: 'small', style: 'margin-top:4px' }, o.rationale)),
+      o.potential_effect ? h('div', { class: 'evidence-item fact' },
+        h('div', { class: 'e-label' }, 'POTENTIELL EFFEKT'),
+        h('div', { class: 'small', style: 'margin-top:4px' }, o.potential_effect)) : null,
+      o.caution ? h('div', { class: 'evidence-item derived' },
+        h('div', { class: 'e-label' }, 'KONTROLLERA FÖRST'),
+        h('div', { class: 'small', style: 'margin-top:4px' }, o.caution)) : null,
+      o.requires_human_review ? h('div', { class: 'muted', style: 'margin-top:6px' }, 'Detta område kräver mänsklig/professionell granskning innan beslut.') : null);
+    return h('div', { class: 'card tight' },
+      h('div', { style: 'display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start' },
+        h('div', { style: 'flex:1;min-width:240px' },
+          h('div', { class: 'tech', style: 'margin-bottom:3px' }, (DOMAIN_LABEL[o.domain] || o.domain) + ' · ' + o.kind.toUpperCase()),
+          h('strong', { class: 'small' }, o.title),
+          h('div', { class: 'muted', style: 'margin-top:3px' }, o.rationale.length > 150 ? o.rationale.slice(0, 150) + '…' : o.rationale)),
+        h('div', { class: 'btnrow' },
+          h('button', { style: 'font-size:12px;padding:5px 12px', onclick: async () => {
+            const r = await api('/opportunities/' + o.id + '/investigate', { method: 'POST' });
+            location.hash = '#/investigation/' + r.id;
+          } }, 'Undersök'),
+          h('button', { class: 'secondary', style: 'font-size:12px;padding:5px 12px', onclick: e => {
+            detail.style.display = detail.style.display === 'none' ? '' : 'none';
+            e.target.textContent = detail.style.display === 'none' ? 'Visa varför' : 'Dölj';
+          } }, 'Visa varför'),
+          h('button', { class: 'ghost', style: 'font-size:12px;padding:5px 12px', onclick: async () => {
+            const reason = prompt('Varför är detta inte relevant? (hjälper systemet lära sig — valfritt)') || null;
+            await api('/opportunities/' + o.id + '/dismiss', { method: 'POST', body: { reason } });
+            toast('Noterat. Den här typen av signal föreslås inte igen.', true); route();
+          } }, 'Inte relevant'))),
+      detail);
+  }
+
   async function dashboardView() {
-    const [status, metrics, changes] = await Promise.all([api('/status'), api('/metrics'), api('/changes')]);
+    const [status, metrics, changes, opportunities] = await Promise.all([api('/status'), api('/metrics'), api('/changes'), api('/opportunities')]);
     UNREAD = status.unread_alerts;
     const sm = STATUS_META[status.overall_status] || STATUS_META.stable;
     const lastIdx = metrics.revenueByMonth.length - 2;
@@ -261,6 +296,10 @@
           : h('div', { class: 'card empty' }, 'Inga väsentliga avvikelser.'),
         infoFindings.length ? h('div', { class: 'section-title' }, 'Information') : null,
         infoFindings.map(findingCard)),
+
+      opportunities.filter(o => o.status === 'proposed').length ? h('div', {},
+        h('div', { class: 'section-title' }, 'Möjligheter värda att undersöka'),
+        opportunities.filter(o => o.status === 'proposed').map(opportunityCard)) : null,
 
       status.narrative ? h('div', { class: 'card' },
         h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'MANAGEMENT ASSESSMENT'),
@@ -398,6 +437,10 @@
         actionForm),
 
       h('div', { class: 'btnrow' },
+        h('button', { onclick: async () => {
+          const r = await api('/findings/' + f.id + '/investigate', { method: 'POST' });
+          location.hash = '#/investigation/' + r.id;
+        } }, 'Undersök'),
         f.status === 'open' ? h('button', { class: 'secondary', onclick: () => setFindingStatus(f.id, 'acknowledged') }, 'Markera som mottagen') : null,
         h('button', { class: 'secondary', onclick: () => setFindingStatus(f.id, 'resolved') }, 'Markera som löst'),
         h('button', { class: 'ghost', onclick: () => setFindingStatus(f.id, 'dismissed') }, 'Avfärda')));
@@ -469,7 +512,17 @@
           h('span', { class: 'tech', style: 'margin-right:10px;color:var(--accent)' }, DOMAIN_LABEL[it.domain] || it.domain || ''),
           h('span', { class: 'tag ' + it.severity }, SEV_LABEL[it.severity]), ' ',
           h('span', { class: 'small' }, it.title))))
-      : h('p', { class: 'muted', style: 'margin-top:8px' }, 'Inget kräver din uppmärksamhet just nu.'));
+      : h('p', { class: 'muted', style: 'margin-top:8px' }, 'Inget kräver din uppmärksamhet just nu.'),
+      (brief.opportunities && brief.opportunities.length) ? h('div', { style: 'margin-top:12px' },
+        h('div', { class: 'tech', style: 'margin-bottom:4px' }, 'MÖJLIGHETER ATT UNDERSÖKA'),
+        brief.opportunities.map(o => h('div', { style: 'display:flex;justify-content:space-between;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--hairline)' },
+          h('span', { class: 'small' },
+            h('span', { class: 'tech', style: 'margin-right:8px;color:var(--accent)' }, DOMAIN_LABEL[o.domain] || o.domain),
+            o.title),
+          h('button', { class: 'secondary', style: 'font-size:11.5px;padding:4px 12px;white-space:nowrap', onclick: async () => {
+            const r = await api('/opportunities/' + o.id + '/investigate', { method: 'POST' });
+            location.hash = '#/investigation/' + r.id;
+          } }, 'Fördjupa')))) : null);
     Motion.revealSeq(briefCard, 'a', 90);
 
     return h('div', {},
@@ -944,6 +997,62 @@
             h('td', {}, dt(a.at)), h('td', {}, a.action), h('td', { class: 'small' }, a.target || ''))))))));
   }
 
+  // ---------- Investigation — låst kontext kring en specifik fråga ----------
+
+  async function investigationView(id) {
+    const data = await api('/investigations/' + id);
+    const inv = data.investigation;
+    const thread = h('div', { class: 'chat-thread' },
+      data.messages.map(m => m.role === 'user'
+        ? h('div', { class: 'chat-q' }, m.content)
+        : h('div', { class: 'chat-a' }, h('div', { class: 'answer small' }, m.content),
+            h('div', { class: 'tech', style: 'margin-top:6px' }, (m.model || '').toUpperCase()))));
+
+    const input = h('input', { placeholder: 'Fortsätt undersökningen… (t.ex. "Han har varit sjuk mycket — justera för det")', style: 'flex:1' });
+    async function send() {
+      const q = input.value.trim();
+      if (!q) return;
+      input.value = '';
+      const pending = h('div', { class: 'chat-a' }, h('div', { class: 'tech' }, 'ANALYSERAR…'));
+      thread.append(h('div', { class: 'chat-q' }, q), pending);
+      try {
+        const r = await api('/investigations/' + id + '/ask', { method: 'POST', body: { question: q } });
+        pending.replaceChildren(h('div', { class: 'answer small' }, r.answer), h('div', { class: 'tech', style: 'margin-top:6px' }, (r.model || '').toUpperCase()));
+        pending.scrollIntoView({ behavior: Motion.reduced ? 'auto' : 'smooth', block: 'end' });
+      } catch (ex) { pending.replaceChildren(h('div', { class: 'error-msg' }, ex.message)); }
+    }
+
+    const ctx = inv.context_json ? JSON.parse(inv.context_json) : null;
+
+    return h('div', {},
+      h('a', { href: '#/', class: 'muted' }, '← Verksamhetsläge'),
+      h('div', { class: 'page-head', style: 'margin-top:10px' },
+        h('div', {},
+          h('div', { class: 'tech', style: 'margin-bottom:4px' }, 'UNDERSÖKNING · ' + (inv.status === 'open' ? 'PÅGÅENDE' : 'AVSLUTAD') + ' · LÅST KONTEXT'),
+          h('h1', {}, inv.title))),
+      h('div', { class: 'card brief' },
+        h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'UTGÅNGSPUNKT'),
+        h('p', { class: 'small' }, inv.question || inv.title),
+        ctx && ctx.caution ? h('p', { class: 'muted', style: 'margin-top:6px' }, 'Kontrollera först: ' + ctx.caution) : null,
+        ctx && ctx.evidence ? h('details', { class: 'evidence-drawer' },
+          h('summary', {}, '▸ Underlag vid start'),
+          h('pre', {}, JSON.stringify(ctx.evidence, null, 2))) : null),
+      thread,
+      inv.status === 'open' ? h('div', { class: 'card tight' },
+        h('div', { style: 'display:flex;gap:8px' }, input,
+          h('button', { onclick: send }, 'Skicka')),
+        h('div', { class: 'btnrow', style: 'margin-top:10px' },
+          h('button', { class: 'secondary', onclick: async () => {
+            const conclusion = prompt('Slutsats för undersökningen:');
+            if (!conclusion) return;
+            await api('/investigations/' + id + '/conclude', { method: 'POST', body: { conclusion } });
+            toast('Undersökningen avslutad och sparad i Management Memory.', true); route();
+          } }, 'Avsluta med slutsats')))
+      : h('div', { class: 'card' },
+          h('div', { class: 'tech', style: 'margin-bottom:4px' }, 'SLUTSATS'),
+          h('p', { class: 'small' }, inv.conclusion || '—')));
+  }
+
   // ---------- Operations (Drift) — Level 2/3 på samma verklighetsmodell ----------
 
   async function operationsView() {
@@ -1247,6 +1356,7 @@
     { re: /^#\/ask$/, view: askView },
     { re: /^#\/liquidity$/, view: liquidityView },
     { re: /^#\/operations$/, view: operationsView },
+    { re: /^#\/investigation\/(.+)$/, view: m => investigationView(m[1]) },
     { re: /^#\/actions$/, view: actionsView },
     { re: /^#\/reports$/, view: reportsView },
     { re: /^#\/alerts$/, view: alertsView },

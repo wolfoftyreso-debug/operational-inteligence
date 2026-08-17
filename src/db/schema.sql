@@ -412,6 +412,59 @@ CREATE TABLE IF NOT EXISTS risks (
   created_at TEXT NOT NULL
 );
 
+-- Opportunities: something could get BETTER (vs findings: something happens,
+-- risks: something could go wrong). Discovered by background intelligence.
+-- Principle: expand the owner's field of view without owning the decision.
+CREATE TABLE IF NOT EXISTS opportunities (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  kind TEXT NOT NULL,              -- purchasing|tax|pricing|incentive|process|...
+  domain TEXT NOT NULL,
+  title TEXT NOT NULL,
+  rationale TEXT NOT NULL,         -- why the system finds this interesting
+  potential_effect TEXT,
+  caution TEXT,                    -- what must be checked before acting
+  confidence REAL NOT NULL,
+  requires_human_review INTEGER DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'proposed', -- proposed|investigating|dismissed|actioned
+  evidence_json TEXT,
+  detected_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  dismissed_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_opp_fp ON opportunities(org_id, fingerprint);
+
+-- Investigations: a locked-context thread around one specific question.
+-- Every discovered issue becomes an optional investigation, never an
+-- automatic conclusion.
+CREATE TABLE IF NOT EXISTS investigations (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  question TEXT,
+  trigger_kind TEXT,               -- opportunity|finding|manual
+  trigger_id TEXT,
+  status TEXT NOT NULL DEFAULT 'open', -- open|concluded|abandoned
+  context_json TEXT,               -- locked context snapshot (evidence, data, scope)
+  conclusion TEXT,
+  confidence REAL,
+  created_by TEXT,
+  created_at TEXT NOT NULL,
+  concluded_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS investigation_messages (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  investigation_id TEXT NOT NULL REFERENCES investigations(id),
+  role TEXT NOT NULL,              -- user|system
+  content TEXT NOT NULL,
+  model TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_invmsg ON investigation_messages(investigation_id, created_at);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id TEXT PRIMARY KEY,
   org_id TEXT,

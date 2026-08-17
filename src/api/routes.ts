@@ -4,7 +4,7 @@
 import { Router, type Request, type Response } from 'express';
 import { all, get, run, uuid, now, today } from '../db';
 import { hashPassword, verifyPassword, generateApiKey, randomToken } from '../core/crypto';
-import { createSession, destroySession, requireAuth, requireAdmin, visibleSeverities, roleLevel } from '../core/auth';
+import { createSession, destroySession, requireAuth, requireAdmin, visibleSeverities, roleLevel, sessionCookie, clearedSessionCookie } from '../core/auth';
 import { audit } from '../core/audit';
 import { computeMetrics, getProfile } from '../analysis/metrics';
 import { computeLiquidity } from '../analysis/liquidity';
@@ -25,7 +25,11 @@ import type { FindingRow, Role } from '../domain/types';
 import { SETTINGS_CATALOG, PRESETS, resolveAll, setSetting, applyPreset, getSettingNumber } from '../core/settings';
 import { unitTree, createUnit, listGoals, createGoal, breakdownGoal, managementContext, UNIT_KINDS } from '../core/hierarchy';
 import { ingestDocument, listDocuments, listDocumentItems, approveItem, rejectItem } from '../ingest/documents';
-import { morningBrief } from '../reasoning';
+import { morningBrief, askInvestigation } from '../reasoning';
+import {
+  listOpportunities, dismissOpportunity, createInvestigation,
+  investigationWithMessages, concludeInvestigation, runOpportunityScan
+} from '../analysis/opportunities';
 
 export const router = Router();
 
@@ -56,8 +60,7 @@ router.post('/auth/register-org', (req: Request, res: Response) => {
   run('INSERT INTO alert_prefs (user_id, channel, min_severity, enabled) VALUES (?,?,?,1)', userId, 'in_app', 'medium');
   const sid = createSession(userId);
   audit(orgId, userId, 'org.created', orgId, { org_name });
-  res.cookie?.('oi_session', sid);
-  res.setHeader('Set-Cookie', `oi_session=${sid}; HttpOnly; Path=/; SameSite=Lax; Max-Age=1209600`);
+  res.setHeader('Set-Cookie', sessionCookie(sid));
   res.json({ ok: true, org_id: orgId });
 });
 
@@ -71,14 +74,14 @@ router.post('/auth/login', (req: Request, res: Response) => {
   }
   const sid = createSession(user.id);
   audit(user.org_id, user.id, 'auth.login');
-  res.setHeader('Set-Cookie', `oi_session=${sid}; HttpOnly; Path=/; SameSite=Lax; Max-Age=1209600`);
+  res.setHeader('Set-Cookie', sessionCookie(sid));
   res.json({ ok: true });
 });
 
 router.post('/auth/logout', requireAuth, (req: Request, res: Response) => {
   const sid = (req.headers.cookie ?? '').split(';').map(s => s.trim()).find(s => s.startsWith('oi_session='))?.slice(11);
   if (sid) destroySession(sid);
-  res.setHeader('Set-Cookie', 'oi_session=; HttpOnly; Path=/; Max-Age=0');
+  res.setHeader('Set-Cookie', clearedSessionCookie());
   res.json({ ok: true });
 });
 
@@ -520,6 +523,86 @@ router.get('/connect/fortnox/start', requireAdmin, (req: Request, res: Response)
   const cfg = { oauth_state: state };
   makeContext(src).saveConfig(cfg);
   res.json({ url: fortnoxAuthorizeUrl(`${src.id}.${state}`) });
+});
+
+// ---------------------------------------------------------------------------
+// Opportunities & Investigations (Background Intelligence)
+// ---------------------------------------------------------------------------
+
+router.get('/opportunities', requireAuth, (req: Request, res: Response) => {
+  res.json(listOpportunities(req.user!.org_id).map(o => ({
+    id: o.id, kind: o.kind, domain: o.domain, title: o.title, rationale: o.rationale,
+    potential_effect: o.potential_effect, caution: o.caution, confidence: o.confidence,
+    requires_human_review: Boolean(o.requires_human_review), status: o.status,
+    evidence: o.evidence_json ? JSON.parse(o.evidence_json) : null, detected_at: o.detected_at
+  })));
+});
+
+router.post('/opportunities/scan', requireAuth, (req: Request, res: Response) => {
+  const result = runOpportunityScan(req.user!.org_id);
+  audit(req.user!.org_id, req.user!.id, 'opportunities.scanned', undefined, result);
+  res.json({ ok: true, ...result });
+});
+
+router.post('/opportunities/:id/dismiss', requireAuth, (req: Request, res: Response) => {
+  if (!dismissOpportunity(req.user!.org_id, req.params.id, req.body?.reason ?? null)) return bad(res, 'Möjligheten finns inte', 404);
+  audit(req.user!.org_id, req.user!.id, 'opportunity.dismissed', req.params.id, { reason: req.body?.reason });
+  res.json({ ok: true });
+});
+
+router.post('/opportunities/:id/investigate', requireAuth, (req: Request, res: Response) => {
+  const opp = listOpportunities(req.user!.org_id, true).find(o => o.id === req.params.id);
+  if (!opp) return bad(res, 'Möjligheten finns inte', 404);
+  const invId = createInvestigation(req.user!.org_id, req.user!.id, {
+    title: opp.title,
+    question: opp.rationale,
+    trigger_kind: 'opportunity',
+    trigger_id: opp.id,
+    context: { kind: opp.kind, rationale: opp.rationale, caution: opp.caution, evidence: opp.evidence_json ? JSON.parse(opp.evidence_json) : null }
+  });
+  audit(req.user!.org_id, req.user!.id, 'investigation.created', invId, { trigger: 'opportunity' });
+  res.json({ ok: true, id: invId });
+});
+
+router.post('/findings/:id/investigate', requireAuth, (req: Request, res: Response) => {
+  const f = get<FindingRow>('SELECT * FROM findings WHERE id = ? AND org_id = ?', req.params.id, req.user!.org_id);
+  if (!f) return bad(res, 'Observationen finns inte', 404);
+  const evidence = all('SELECT kind, label, value, calculation, source_label FROM evidence WHERE finding_id = ?', f.id);
+  const invId = createInvestigation(req.user!.org_id, req.user!.id, {
+    title: f.title, question: f.description, trigger_kind: 'finding', trigger_id: f.id,
+    context: { category: f.category, severity: f.severity, evidence }
+  });
+  audit(req.user!.org_id, req.user!.id, 'investigation.created', invId, { trigger: 'finding' });
+  res.json({ ok: true, id: invId });
+});
+
+router.get('/investigations', requireAuth, (req: Request, res: Response) => {
+  res.json(all('SELECT id, title, status, trigger_kind, created_at, concluded_at, conclusion FROM investigations WHERE org_id = ? ORDER BY created_at DESC LIMIT 50', req.user!.org_id));
+});
+
+router.get('/investigations/:id', requireAuth, (req: Request, res: Response) => {
+  const { investigation, messages } = investigationWithMessages(req.user!.org_id, req.params.id);
+  if (!investigation) return bad(res, 'Undersökningen finns inte', 404);
+  res.json({ investigation, messages });
+});
+
+router.post('/investigations/:id/ask', requireAuth, async (req: Request, res: Response) => {
+  const { question } = req.body ?? {};
+  if (!question) return bad(res, 'question krävs');
+  try {
+    const result = await askInvestigation(req.user!.org_id, req.params.id, req.user!.id, String(question));
+    res.json(result);
+  } catch (e) {
+    bad(res, String(e instanceof Error ? e.message : e), 500);
+  }
+});
+
+router.post('/investigations/:id/conclude', requireAuth, (req: Request, res: Response) => {
+  const { conclusion, confidence } = req.body ?? {};
+  if (!conclusion) return bad(res, 'conclusion krävs');
+  if (!concludeInvestigation(req.user!.org_id, req.params.id, String(conclusion), confidence ?? null)) return bad(res, 'Undersökningen finns inte', 404);
+  audit(req.user!.org_id, req.user!.id, 'investigation.concluded', req.params.id);
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------

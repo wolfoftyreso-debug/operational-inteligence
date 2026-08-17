@@ -14,6 +14,7 @@ import { computeLiquidity } from '../analysis/liquidity';
 import { constitution, getSetting } from '../core/settings';
 import { managementContext, goalTargetForMonth } from '../core/hierarchy';
 import { computeProductivity } from '../analysis/productivity';
+import { investigationWithMessages, addInvestigationMessage, listOpportunities } from '../analysis/opportunities';
 
 export interface ReasoningProvider {
   name: string;
@@ -550,12 +551,51 @@ export async function askBusiness(orgId: string, userId: string | null, question
 }
 
 // ---------------------------------------------------------------------------
+// Investigations — locked-context dialog. The thread is bound to one
+// specific question with its own evidence; the user never has to re-explain.
+// ---------------------------------------------------------------------------
+
+export async function askInvestigation(orgId: string, investigationId: string, userId: string | null, question: string): Promise<{ answer: string; model: string }> {
+  const { investigation, messages } = investigationWithMessages(orgId, investigationId);
+  if (!investigation) throw new Error('Undersökningen finns inte');
+  addInvestigationMessage(orgId, investigationId, 'user', question);
+
+  const intent = classifyIntent(question);
+  const pkg = buildEvidencePackage(orgId, userId, intent, question);
+  const provider = getProvider();
+  let answer: string;
+
+  if (provider.name === 'deterministic') {
+    const parts = [pkg.deterministic_answer];
+    if (pkg.missing_data.length) parts.push('Saknat underlag: ' + pkg.missing_data.join('; '));
+    parts.push(`(Svar inom undersökningen "${investigation.title}" — kontexten är låst till denna fråga. Deterministiskt sammanställt.)`);
+    answer = parts.join('\n\n');
+  } else {
+    const user = [
+      `LÅST UNDERSÖKNINGSKONTEXT — all dialog gäller denna specifika fråga:`,
+      `Undersökning: ${investigation.title}`,
+      investigation.question ? `Ursprunglig fråga: ${investigation.question}` : '',
+      investigation.context_json ? `Underlag vid start: ${investigation.context_json}` : '',
+      messages.length ? `Tidigare dialog:\n${messages.slice(-8).map(m => `${m.role === 'user' ? 'Ägaren' : 'Systemet'}: ${m.content.slice(0, 400)}`).join('\n')}` : '',
+      `Aktuellt deterministiskt evidenspaket (intent ${intent}): ${JSON.stringify(pkg.facts)}`,
+      `Ägarens nya inlägg: "${question}"`,
+      'Resonera vidare INOM undersökningens fråga. Om ägaren tillför ny kontext (t.ex. en förklaring), justera bedömningen och säg vad som förändras. Avsluta med vad som återstår att klarlägga.'
+    ].filter(Boolean).join('\n\n');
+    answer = await provider.complete(systemPrompt(orgId), user);
+  }
+
+  addInvestigationMessage(orgId, investigationId, 'system', answer, provider.model);
+  return { answer, model: provider.model };
+}
+
+// ---------------------------------------------------------------------------
 // Morning brief — the chat's landing surface, scoped to the user.
 // ---------------------------------------------------------------------------
 
 export function morningBrief(orgId: string, userId: string): {
   greeting: string; intro: string; status: string | null;
   items: { severity: string; title: string; id: string; domain: string }[];
+  opportunities: { id: string; title: string; domain: string; kind: string }[];
   assessment: string | null; mode: string;
 } {
   const user = get<{ name: string }>('SELECT name FROM users WHERE id = ?', userId);
@@ -567,13 +607,17 @@ export function morningBrief(orgId: string, userId: string): {
   const hour = new Date().getHours();
   const greeting = `${hour < 10 ? 'God morgon' : hour < 18 ? 'God dag' : 'God kväll'}${user ? ' ' + user.name.split(' ')[0] : ''}.`;
   const { domainFor } = require('../analysis/engine') as { domainFor(c: string): string };
+  const opportunities = listOpportunities(orgId).filter(o => o.status === 'proposed').slice(0, 3);
+  // Honesty: when there's nothing, say exactly that — never invent an insight.
+  const intro = findings.length || opportunities.length
+    ? `Jag har gått igenom verksamheten sedan din senaste uppdatering. ${findings.length ? `${findings.length} ${findings.length === 1 ? 'sak förtjänar' : 'saker förtjänar'} din uppmärksamhet.` : ''}${opportunities.length ? ` Jag har också ${opportunities.length === 1 ? 'en möjlighet' : opportunities.length + ' möjligheter'} som kan vara ${opportunities.length === 1 ? 'värd' : 'värda'} att undersöka.` : ''}`
+    : 'Jag har gått igenom verksamheten. Inga nya väsentliga avvikelser identifierades — läget ligger inom sina normala intervall.';
   return {
     greeting,
-    intro: findings.length
-      ? `Jag har tittat på verksamheten. ${findings.length} ${findings.length === 1 ? 'sak förtjänar' : 'saker förtjänar'} din uppmärksamhet.`
-      : 'Jag har tittat på verksamheten. Inget kräver din uppmärksamhet just nu.',
+    intro,
     status: runInfo?.summary ?? null,
     items: findings.map(f => ({ severity: f.severity, title: f.title, id: f.id, domain: domainFor(f.category) })),
+    opportunities: opportunities.map(o => ({ id: o.id, title: o.title, domain: o.domain, kind: o.kind })),
     assessment: runInfo?.narrative ?? null,
     mode
   };

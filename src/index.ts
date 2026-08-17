@@ -6,17 +6,21 @@ import { getDb, get, run, now } from './db';
 import { authenticate } from './core/auth';
 import { router as apiRouter } from './api/routes';
 import { rssAlerts, rssFindings, rssManagement } from './api/rss';
-import { getDataSource, makeContext, getConnector } from './connectors/registry';
+import { getDataSource, makeContext } from './connectors/registry';
 import { fortnoxExchangeCode } from './connectors/fortnox';
 import { decryptSecret } from './core/crypto';
 import { audit } from './core/audit';
+import { requestLogger, securityHeaders, errorHandler, authRateLimit, log } from './core/http';
 
 getDb();
 
 const app = express();
 app.disable('x-powered-by');
+app.use(securityHeaders);
 app.use(express.json({ limit: '25mb' }));
 app.use(authenticate);
+app.use(requestLogger);
+app.use('/api/v1/auth', authRateLimit);
 
 // API
 app.use('/api/v1', apiRouter);
@@ -49,9 +53,18 @@ app.get('/connect/fortnox/callback', async (req, res) => {
   }
 });
 
-// Health
+// Health probes: /healthz = liveness (process up), /readyz = readiness
+// (database reachable and schema loaded).
 app.get('/healthz', (_req, res) => {
   res.json({ ok: true, at: now() });
+});
+app.get('/readyz', (_req, res) => {
+  try {
+    get('SELECT 1 as ok');
+    res.json({ ok: true, db: 'ok', at: now() });
+  } catch (e) {
+    res.status(503).json({ ok: false, db: String(e) });
+  }
 });
 
 // Static frontend
@@ -64,11 +77,23 @@ app.get('*', (_req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'));
 });
 
+app.use(errorHandler);
+
 if (require.main === module) {
-  app.listen(config.port, () => {
-    // eslint-disable-next-line no-console
-    console.log(`Operational Intelligence beta körs på ${config.baseUrl} (port ${config.port})`);
+  const server = app.listen(config.port, () => {
+    log('info', 'server_started', { base_url: config.baseUrl, port: config.port, node: process.version });
   });
+  // Graceful shutdown: finish in-flight requests before exit (K8s SIGTERM).
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.on(signal, () => {
+      log('info', 'shutdown_initiated', { signal });
+      server.close(() => {
+        log('info', 'shutdown_complete', {});
+        process.exit(0);
+      });
+      setTimeout(() => process.exit(1), 10000).unref();
+    });
+  }
 }
 
 export { app };

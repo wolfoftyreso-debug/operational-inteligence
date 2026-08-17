@@ -23,6 +23,16 @@ declare global {
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
 
+/** Session cookie string — Secure is added automatically when served over TLS. */
+export function sessionCookie(sid: string): string {
+  const secure = (process.env.OI_BASE_URL ?? '').startsWith('https') ? '; Secure' : '';
+  return `oi_session=${sid}; HttpOnly; Path=/; SameSite=Lax; Max-Age=1209600${secure}`;
+}
+
+export function clearedSessionCookie(): string {
+  return 'oi_session=; HttpOnly; Path=/; Max-Age=0';
+}
+
 export function createSession(userId: string): string {
   const id = uuid() + uuid().replace(/-/g, '');
   const expires = new Date(Date.now() + SESSION_TTL_MS).toISOString();

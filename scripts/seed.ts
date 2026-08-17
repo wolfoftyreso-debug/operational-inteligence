@@ -107,7 +107,7 @@ async function main(): Promise<void> {
   console.log('Styrande dokument tolkat:', JSON.stringify(doc.counts));
 
   // Data source: CSV connector (the real ingest pipeline)
-  const src = createDataSource(orgId, 'csv', 'Ekonomiexport (CSV)', {});
+  const src = createDataSource(orgId, 'csv', 'Ekonomiexport', {});
   const ctx = makeContext(src);
 
   // --- Generate 18 months of transactions ---
@@ -149,6 +149,12 @@ async function main(): Promise<void> {
       txLines.push(`${txId++};${mo.label}-${pad(day)};${cat};${Math.round(amount)};kostnad;${cat};`);
     }
   }
+
+  // Single large investment + development costs → the tax opportunity
+  // detectors get something real to be curious about.
+  const twoMonthsAgo = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
+  txLines.push(`${txId++};${twoMonthsAgo};Fyrhjulsinställare ny maskin;620000;kostnad;investeringar;Verkstad Nord`);
+  txLines.push(`${txId++};${twoMonthsAgo};Utveckling internt planeringssystem;340000;kostnad;utveckling;`);
 
   const txResult = ingestCsvContent(ctx, { filename: 'transaktioner.csv', content: txLines.join('\n'), dataset: 'transactions' });
   console.log('Transaktioner importerade:', JSON.stringify(txResult.datasets));

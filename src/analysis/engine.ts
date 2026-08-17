@@ -579,6 +579,13 @@ export async function runAnalysis(orgId: string, opts: { skipNarrative?: boolean
     dispatchAlertsForFinding(f);
   }
 
+  // Background intelligence: scan for opportunities (question-first,
+  // never verdicts). Dismissed fingerprints stay dismissed.
+  try {
+    const { runOpportunityScan } = require('./opportunities') as typeof import('./opportunities');
+    runOpportunityScan(orgId);
+  } catch { /* opportunity scan must never block the analysis */ }
+
   // Narrative from the reasoning engine (optional, model-agnostic, non-blocking failure).
   if (!opts.skipNarrative) {
     try {
