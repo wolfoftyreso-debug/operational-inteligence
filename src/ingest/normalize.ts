@@ -25,7 +25,13 @@ const ALIASES: Record<string, string[]> = {
   balance: ['saldo', 'balance', 'kvarstående', 'restbelopp', 'outstanding'],
   status: ['status', 'tillstånd'],
   role: ['roll', 'role', 'befattning', 'title'],
-  email: ['epost', 'e-post', 'email', 'mail']
+  email: ['epost', 'e-post', 'email', 'mail'],
+  employee: ['tekniker', 'anställd', 'mekaniker', 'employee', 'montör', 'personalnamn'],
+  work_order: ['arbetsorder', 'work order', 'workorder', 'ao', 'ordernr', 'order'],
+  hours_worked: ['arbetade timmar', 'worked hours', 'timmar', 'hours', 'arbetstid'],
+  hours_billed: ['debiterade timmar', 'fakturerade timmar', 'billed hours', 'debiterat', 'fakturerat'],
+  opened_date: ['öppnad', 'opened', 'startdatum', 'inlämnad'],
+  closed_date: ['stängd', 'closed', 'slutdatum', 'klar', 'avslutad']
 };
 
 function normHeader(h: string): string {
@@ -48,6 +54,8 @@ export function mapHeaders(headers: string[]): Record<string, string> {
 export function detectDataset(headers: string[]): string {
   const m = mapHeaders(headers);
   const hs = headers.map(normHeader).join('|');
+  if (m.hours_worked || m.hours_billed || /arbetade timmar|debiterade timmar/.test(hs)) return 'time_entries';
+  if (m.work_order && (m.status || m.opened_date) && !m.amount) return 'work_orders';
   if (m.due_date || /förfall|due/.test(hs)) {
     if (/leverantör|supplier/.test(hs)) return 'invoices_supplier';
     return 'invoices_customer';
@@ -185,6 +193,54 @@ export function normalizeRows(
           issue, due, paid, Math.abs(amount), Math.abs(balance ?? 0),
           String(pick(row, hm, 'currency') ?? 'SEK') || 'SEK',
           status, unitId, sourceId, now()
+        );
+        stats.upserted++;
+      } else if (dataset === 'time_entries') {
+        const date = parseDate(pick(row, hm, 'date'));
+        const worked = parseAmount(pick(row, hm, 'hours_worked'));
+        if (!date || worked === null) { stats.skipped++; continue; }
+        const billed = parseAmount(pick(row, hm, 'hours_billed'));
+        const empName = pick(row, hm, 'employee') as string | null;
+        let empId: string | null = null;
+        if (empName) {
+          const emp = get<{ id: string }>('SELECT id FROM employees WHERE org_id = ? AND lower(name) = lower(?)', orgId, String(empName).trim());
+          empId = emp?.id ?? null;
+        }
+        const unitId = findOrCreateUnit(orgId, pick(row, hm, 'unit') as string | null);
+        run(
+          `INSERT INTO time_entries (id, org_id, external_id, date, employee_id, employee_name, unit_id, work_order_ref, hours_worked, hours_billed, source_id, imported_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT (org_id, source_id, external_id) WHERE external_id IS NOT NULL
+           DO UPDATE SET date=excluded.date, employee_id=excluded.employee_id, employee_name=excluded.employee_name,
+             unit_id=excluded.unit_id, work_order_ref=excluded.work_order_ref,
+             hours_worked=excluded.hours_worked, hours_billed=excluded.hours_billed, imported_at=excluded.imported_at`,
+          uuid(), orgId, externalId, date, empId,
+          empName ? String(empName).trim() : null, unitId,
+          pick(row, hm, 'work_order') !== undefined ? String(pick(row, hm, 'work_order')) : null,
+          worked, billed, sourceId, now()
+        );
+        stats.upserted++;
+      } else if (dataset === 'work_orders') {
+        const woRef = pick(row, hm, 'work_order') ?? externalId;
+        if (!woRef && !externalId) { stats.skipped++; continue; }
+        const unitId = findOrCreateUnit(orgId, pick(row, hm, 'unit') as string | null);
+        const statusRaw = String(pick(row, hm, 'status') ?? '').toLowerCase();
+        run(
+          `INSERT INTO work_orders (id, org_id, external_id, title, category, status, unit_id, customer_name, opened_date, closed_date, source_id, imported_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT (org_id, source_id, external_id) WHERE external_id IS NOT NULL
+           DO UPDATE SET title=excluded.title, category=excluded.category, status=excluded.status,
+             unit_id=excluded.unit_id, customer_name=excluded.customer_name,
+             opened_date=excluded.opened_date, closed_date=excluded.closed_date, imported_at=excluded.imported_at`,
+          uuid(), orgId, externalId ?? String(woRef),
+          String(pick(row, hm, 'description') ?? '') || null,
+          String(pick(row, hm, 'category') ?? '').trim().toLowerCase() || null,
+          /klar|stängd|closed|avslutad/.test(statusRaw) ? 'closed' : /makuler|cancel/.test(statusRaw) ? 'cancelled' : 'open',
+          unitId,
+          (pick(row, hm, 'counterparty') as string | null) || null,
+          parseDate(pick(row, hm, 'opened_date')) ?? parseDate(pick(row, hm, 'date')),
+          parseDate(pick(row, hm, 'closed_date')),
+          sourceId, now()
         );
         stats.upserted++;
       } else if (dataset === 'employees') {

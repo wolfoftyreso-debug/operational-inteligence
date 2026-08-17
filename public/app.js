@@ -52,6 +52,14 @@
     critical: { label: 'Kritiskt läge', sub: 'Omedelbar hantering krävs.' }
   };
   const ROLE_LABEL = { technician: 'Tekniker', team_manager: 'Teamledare', department_manager: 'Avdelningschef', facility_manager: 'Platschef', executive: 'VD/Ledning', admin: 'Administratör' };
+  const DOMAIN_LABEL = { ekonomi: 'EKONOMI', 'skatt_ägare': 'SKATT & ÄGARE', personal: 'PERSONAL', 'inköp': 'INKÖP', 'försäljning': 'FÖRSÄLJNING', drift: 'DRIFT', marknad: 'MARKNAD', risk: 'RISK', 'mål': 'MÅL', system: 'SYSTEM' };
+
+  function tierBadge(confidence) {
+    const pct = Math.round(confidence * 100);
+    if (confidence >= 0.85) return h('span', { class: 'pill-status ok' }, 'HIGH CONFIDENCE ' + pct + '%');
+    if (confidence >= 0.6) return h('span', { class: 'pill-status configured', style: 'background:var(--warn-soft);color:var(--warn)' }, 'MODERATE ' + pct + '%');
+    return h('span', { class: 'pill-status error' }, 'LOW CONFIDENCE ' + pct + '%');
+  }
 
   function toast(msg, ok) {
     const t = h('div', { class: ok ? 'ok-msg' : 'error-msg', style: 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:99;box-shadow:0 8px 30px rgba(0,0,0,.15)' }, msg);
@@ -70,6 +78,7 @@
     { hash: '#/ask', label: 'Fråga verksamheten', ico: '?', min: 1 },
     { hash: '#/findings', label: 'Observationer', ico: '☰', min: 0 },
     { hash: '#/liquidity', label: 'Likviditet', ico: '≈', min: 2 },
+    { hash: '#/operations', label: 'Drift', ico: '⚒', min: 1 },
     { hash: '#/actions', label: 'Åtgärder & beslut', ico: '✓', min: 1 },
     { hash: '#/governance', label: 'Styrning', ico: '§', min: 3 },
     { hash: '#/reports', label: 'Rapporter', ico: '▤', min: 2 },
@@ -124,13 +133,21 @@
 
   function loginView(showRegister) {
     const err = h('div');
+    const VERTICALS = [['workshop', 'Verkstad'], ['construction', 'Byggföretag'], ['electrician', 'Elektriker'], ['consulting', 'Konsult'], ['restaurant', 'Restaurang'], ['ecommerce', 'E-handel'], ['other', 'Annat']];
+    const FOCUS = [['ekonomi', 'Ekonomin'], ['likviditet', 'Likviditeten'], ['personal', 'Personal'], ['inköp', 'Inköp'], ['försäljning', 'Försäljning'], ['skatt_ägare', 'Skatt/ägare'], ['allt', 'Hela verksamheten']];
     const form = showRegister
       ? h('form', { onsubmit: onRegister },
+          h('label', { class: 'fld' }, h('span', {}, 'Vad driver du?'),
+            h('select', { name: 'vertical' }, VERTICALS.map(([v, l]) => h('option', { value: v }, l)))),
+          h('label', { class: 'fld' }, h('span', {}, 'Vad vill du framför allt ha hjälp med?'),
+            h('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;margin-top:2px' },
+              FOCUS.map(([v, l]) => h('label', { style: 'display:flex;align-items:center;gap:5px;font-size:12.5px;border:1px solid var(--hairline-strong);border-radius:5px;padding:5px 9px;cursor:pointer' },
+                h('input', { type: 'checkbox', name: 'focus', value: v, style: 'width:auto' }), l)))),
           h('label', { class: 'fld' }, h('span', {}, 'Företagets namn'), h('input', { name: 'org_name', required: '' })),
           h('label', { class: 'fld' }, h('span', {}, 'Ditt namn'), h('input', { name: 'name', required: '' })),
           h('label', { class: 'fld' }, h('span', {}, 'E-post'), h('input', { name: 'email', type: 'email', required: '' })),
           h('label', { class: 'fld' }, h('span', {}, 'Lösenord (minst 8 tecken)'), h('input', { name: 'password', type: 'password', required: '', minlength: 8 })),
-          h('button', { style: 'width:100%' }, 'Skapa organisation'),
+          h('button', { style: 'width:100%' }, 'Kom igång'),
           h('p', { class: 'muted', style: 'margin-top:12px;text-align:center' },
             'Har du redan konto? ', h('a', { href: '#', onclick: e => { e.preventDefault(); renderLogin(false); } }, 'Logga in')))
       : h('form', { onsubmit: onLogin },
@@ -152,7 +169,10 @@
       e.preventDefault();
       const f = new FormData(e.target);
       try {
-        await api('/auth/register-org', { method: 'POST', body: { org_name: f.get('org_name'), name: f.get('name'), email: f.get('email'), password: f.get('password') } });
+        await api('/auth/register-org', { method: 'POST', body: {
+          org_name: f.get('org_name'), name: f.get('name'), email: f.get('email'), password: f.get('password'),
+          vertical: f.get('vertical'), focus_areas: f.getAll('focus')
+        } });
         await boot();
       } catch (ex) { err.replaceChildren(h('div', { class: 'error-msg' }, ex.message)); }
     }
@@ -294,6 +314,7 @@
         h('div', { class: 'f-desc' }, f.description.length > 220 ? f.description.slice(0, 220) + '…' : f.description),
         h('div', { class: 'f-meta' },
           h('span', { class: 'tag ' + f.severity }, SEV_LABEL[f.severity]),
+          f.domain ? h('span', { class: 'tag epistemic' }, DOMAIN_LABEL[f.domain] || f.domain) : null,
           h('span', { class: 'tag epistemic' }, EPI_LABEL[f.epistemic] || f.epistemic),
           confidenceBar(f.confidence),
           h('span', { class: 'muted' }, d10(f.detected_at)))));
@@ -392,14 +413,22 @@
   async function askView() {
     const [brief, history] = await Promise.all([api('/brief'), api('/ask/history')]);
     const thread = h('div', { class: 'chat-thread' });
-    const examples = ['Har vi fått betalt för allt vi köpte in förra månaden?', 'Vilka kunder påverkar likviditeten mest?', 'Hur ligger vi till mot våra mål?', 'Vad är den största risken just nu?', 'Vad har vi lagt mest pengar på?', 'Vilka åtgärder gav faktisk effekt?'];
+    const examples = ['Har vi råd att köpa en kompressor för 180 000 kr?', 'Har vi råd att anställa en mekaniker till?', 'Borde jag ta ut mer lön eller utdelning?', 'Vad händer om vi höjer priserna 5 %?', 'Hur mycket måste vi sälja för att nå årets mål?', 'Har vi fått betalt för allt vi köpte in förra månaden?', 'Vilka kunder påverkar likviditeten mest?', 'Vad är den största risken just nu?'];
 
     function answerBlock(q, r) {
       return h('div', {},
         h('div', { class: 'chat-q' }, q),
         h('div', { class: 'chat-a' },
-          h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'BUSINESS INTELLIGENCE · INTENT ' + (r.intent || '—').toUpperCase().replace(/_/g, ' ')),
+          h('div', { class: 'tech-row', style: 'margin-bottom:8px' },
+            h('span', { class: 'tech' }, 'INTENT ' + (r.intent || '—').toUpperCase().replace(/_/g, ' ')),
+            r.domain ? h('span', { class: 'tech' }, DOMAIN_LABEL[r.domain] || r.domain) : null,
+            r.confidence !== undefined ? tierBadge(r.confidence) : null),
           h('div', { class: 'answer' }, r.answer),
+          (r.missing_data && r.missing_data.length) ? h('div', { class: 'error-msg', style: 'margin-top:10px;margin-bottom:0' },
+            h('strong', {}, 'Saknat underlag: '),
+            h('ul', { class: 'list-plain', style: 'margin-top:4px' }, r.missing_data.map(m => h('li', {}, '→ ' + m)))) : null,
+          r.requires_human_review ? h('div', { class: 'ok-msg', style: 'margin-top:10px;margin-bottom:0;background:var(--warn-soft);color:var(--warn);border-color:#eadbbd' },
+            'Beslutsstöd — detta område (skatt/ägare) kräver mänsklig granskning innan beslut. Stäm av med er redovisningskonsult.') : null,
           h('details', { class: 'evidence-drawer' },
             h('summary', {}, '▸ Underlag — ' + (r.evidence.datapoints ?? '?') + ' datapunkter · ' + ((r.evidence.sources || []).join(', ') || 'manuell data')),
             h('div', { class: 'muted', style: 'margin-top:6px' }, 'Period: ' + r.evidence.period + ' · Modell: ' + r.model),
@@ -433,10 +462,11 @@
     const briefCard = h('div', { class: 'card brief' },
       h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'DAILY BRIEF · ' + (brief.mode || '').toUpperCase().replace('_', ' ')),
       h('h2', {}, brief.greeting),
-      brief.status ? h('p', { class: 'small', style: 'color:var(--ink-soft);margin-top:4px' }, brief.status) : null,
+      brief.intro ? h('p', { class: 'small', style: 'color:var(--ink-soft);margin-top:4px' }, brief.intro) : null,
       brief.items.length ? h('div', { style: 'margin-top:10px' },
-        brief.items.map((it, i) => h('a', { href: '#/finding/' + it.id, style: 'display:block;text-decoration:none;color:inherit;padding:6px 0;border-bottom:1px solid var(--hairline)' },
+        brief.items.map((it, i) => h('a', { href: '#/finding/' + it.id, style: 'display:block;text-decoration:none;color:inherit;padding:7px 0;border-bottom:1px solid var(--hairline)' },
           h('span', { class: 'tech', style: 'margin-right:10px' }, String(i + 1).padStart(2, '0')),
+          h('span', { class: 'tech', style: 'margin-right:10px;color:var(--accent)' }, DOMAIN_LABEL[it.domain] || it.domain || ''),
           h('span', { class: 'tag ' + it.severity }, SEV_LABEL[it.severity]), ' ',
           h('span', { class: 'small' }, it.title))))
       : h('p', { class: 'muted', style: 'margin-top:8px' }, 'Inget kräver din uppmärksamhet just nu.'));
@@ -686,7 +716,9 @@
   // ---------- integrations ----------
 
   async function integrationsView() {
-    const [connectors, sources] = await Promise.all([api('/connectors'), api('/sources')]);
+    const [connectorsResp, sources] = await Promise.all([api('/connectors'), api('/sources')]);
+    const connectors = connectorsResp.available;
+    const planned = connectorsResp.planned || [];
     const connectorByKey = {};
     connectors.forEach(c => { connectorByKey[c.key] = c; });
 
@@ -784,7 +816,17 @@
             h('td', {}, h('strong', {}, c.name), h('div', { class: 'muted' }, c.description)),
             h('td', {}, c.auth_kind),
             h('td', { class: 'small' }, c.datasets.map(d => d.label).join(', ')),
-            h('td', {}, h('span', { class: 'pill-status ' + (c.availability.ok ? 'ok' : 'configured') }, c.availability.ok ? 'Tillgänglig' : 'Kräver konfig')))))))));
+            h('td', {}, h('span', { class: 'pill-status ' + (c.availability.ok ? 'ok' : 'configured') }, c.availability.ok ? 'Tillgänglig' : 'Kräver konfig'))))))),
+        planned.length ? h('div', {},
+          h('div', { class: 'section-title' }, 'Planerade connectors — byggs enligt kundbehov (adapter-flywheel)'),
+          h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
+            h('thead', {}, h('tr', {}, h('th', {}, 'System'), h('th', {}, 'Kategori'), h('th', {}, 'Tier'), h('th', {}, 'Notering'))),
+            h('tbody', {}, planned.map(p => h('tr', {},
+              h('td', {}, h('strong', {}, p.name)),
+              h('td', {}, p.category),
+              h('td', {}, h('code', { class: 'inline' }, 'Tier ' + p.tier)),
+              h('td', { class: 'small muted' }, p.note)))))),
+          h('p', { class: 'muted', style: 'margin-top:8px' }, 'Tills en connector finns tar CSV/Excel/Generic API in samma data — och systemet föreslår automatiskt integration när det ser återkommande manuella importer.')) : null));
   }
 
   // ---------- profile ----------
@@ -900,6 +942,58 @@
           h('thead', {}, h('tr', {}, h('th', {}, 'Tid'), h('th', {}, 'Händelse'), h('th', {}, 'Mål'))),
           h('tbody', {}, auditLog.slice(0, 40).map(a => h('tr', {},
             h('td', {}, dt(a.at)), h('td', {}, a.action), h('td', { class: 'small' }, a.target || ''))))))));
+  }
+
+  // ---------- Operations (Drift) — Level 2/3 på samma verklighetsmodell ----------
+
+  async function operationsView() {
+    const p = await api('/productivity');
+    if (!p.hasData) {
+      return h('div', {},
+        h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Drift'))),
+        h('div', { class: 'card empty' },
+          'Ingen tidsdata ännu. Importera tidsposter (datum, tekniker, arbetade timmar, debiterade timmar) via CSV/Excel under Integrationer, eller koppla verkstads-/fältsystemet.'));
+    }
+    const ratioPoints = p.weeks.filter(w => w.ratio !== null).map(w => ({ period: w.week, value: Math.round(w.ratio * 100) }));
+    const pct = v => v === null ? '–' : Math.round(v * 100) + ' %';
+    const chg = c => c === null ? h('span', { class: 'muted' }, '–')
+      : h('span', { class: 'delta ' + (c < -0.02 ? 'down' : c > 0.02 ? 'up' : 'flat'), style: 'font-family:var(--mono);font-size:11.5px' },
+          (c >= 0 ? '+' : '−') + Math.abs(c * 100).toFixed(1) + '%');
+
+    const root = h('div', {},
+      h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Drift'),
+        h('div', { class: 'sub' }, 'Maximum data resolution, minimum cognitive load: aggregerat per vecka och enhet — med underlaget kvar på person × dag-nivå.'))),
+      h('div', { class: 'grid kpis' },
+        kpiCard('PRODUKTIVITET · 3 VECKOR', p.overall.recentRatio !== null ? pct(p.overall.recentRatio) : '–',
+          p.overall.change !== null ? { text: (p.overall.change >= 0 ? '+' : '−') + Math.abs(p.overall.change * 100).toFixed(1) + '% MOT NORMAL', dir: p.overall.change < -0.02 ? 'down' : 'up' } : null),
+        kpiCard('NORMALNIVÅ · 6 VECKOR', pct(p.overall.baselineRatio), null),
+        kpiCard('ARBETADE TIMMAR / VECKA', String(p.overall.workedRecent), { text: p.overall.hoursNormal ? 'NORMAL VOLYM' : 'AVVIKANDE VOLYM', dir: p.overall.hoursNormal ? 'up' : 'down' })),
+      chartCard('Produktivitet per vecka', 'DEBITERADE / ARBETADE TIMMAR · %', lineChart([
+        { label: 'Produktivitet', color: '#12507b', points: ratioPoints, area: true }
+      ])),
+      h('div', { class: 'grid two' },
+        h('div', { class: 'card' },
+          h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'PER ENHET · SENASTE 3 VECKOR MOT NORMAL'),
+          h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
+            h('thead', {}, h('tr', {}, h('th', {}, 'Enhet'), h('th', { class: 'num' }, 'Nu'), h('th', { class: 'num' }, 'Normal'), h('th', { class: 'num' }, 'Förändring'), h('th', { class: 'num' }, 'Timmar'))),
+            h('tbody', {}, p.byUnit.map(u => h('tr', {},
+              h('td', {}, u.unit), h('td', { class: 'num' }, pct(u.recentRatio)), h('td', { class: 'num' }, pct(u.baselineRatio)),
+              h('td', { class: 'num' }, chg(u.change)), h('td', { class: 'num' }, u.worked))))))),
+        h('div', { class: 'card' },
+          h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'PER PERSON · DRILL-DOWN TILL UNDERLAGET'),
+          h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
+            h('thead', {}, h('tr', {}, h('th', {}, 'Person'), h('th', {}, 'Enhet'), h('th', { class: 'num' }, 'Nu'), h('th', { class: 'num' }, 'Normal'), h('th', { class: 'num' }, 'Förändring'))),
+            h('tbody', {}, p.byEmployee.slice(0, 14).map(e => h('tr', {},
+              h('td', {}, e.name), h('td', { class: 'small muted' }, e.unit || '–'),
+              h('td', { class: 'num' }, pct(e.recentRatio)), h('td', { class: 'num' }, pct(e.baselineRatio)),
+              h('td', { class: 'num' }, chg(e.change))))))),
+          h('p', { class: 'muted', style: 'margin-top:8px' }, 'Underliggande tidsposter lagras per person × dag × arbetsorder och kan alltid nås från evidenskedjan.'))));
+
+    root.querySelectorAll('.chart-box svg').forEach(svg => {
+      svg.classList.add('chart-pending');
+      Motion.onVisible(svg.closest('.card') || svg, () => Motion.drawChart(svg, 850));
+    });
+    return root;
   }
 
   // ---------- Control Center ----------
@@ -1152,6 +1246,7 @@
     { re: /^#\/finding\/(.+)$/, view: m => findingDetailView(m[1]) },
     { re: /^#\/ask$/, view: askView },
     { re: /^#\/liquidity$/, view: liquidityView },
+    { re: /^#\/operations$/, view: operationsView },
     { re: /^#\/actions$/, view: actionsView },
     { re: /^#\/reports$/, view: reportsView },
     { re: /^#\/alerts$/, view: alertsView },

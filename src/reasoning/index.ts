@@ -13,6 +13,7 @@ import { computeMetrics, getProfile } from '../analysis/metrics';
 import { computeLiquidity } from '../analysis/liquidity';
 import { constitution, getSetting } from '../core/settings';
 import { managementContext, goalTargetForMonth } from '../core/hierarchy';
+import { computeProductivity } from '../analysis/productivity';
 
 export interface ReasoningProvider {
   name: string;
@@ -177,10 +178,17 @@ function composeDeterministic(orgId: string, status: OverallStatus, findings: Fi
 
 export type Intent =
   | 'payments_reconciliation' | 'liquidity' | 'risk' | 'decisions' | 'actions_effect'
-  | 'changes' | 'revenue_result' | 'costs' | 'customers' | 'goals' | 'general';
+  | 'changes' | 'revenue_result' | 'costs' | 'customers' | 'goals'
+  | 'affordability' | 'hiring' | 'owner_compensation' | 'pricing_scenario' | 'sales_target'
+  | 'general';
 
 export function classifyIntent(question: string): Intent {
   const q = question.toLowerCase();
+  if (/ta ut (mer )?(lön|pengar)|utdelning|ägaruttag|eget uttag|lön till mig|dela ut/.test(q)) return 'owner_compensation';
+  if (/anställa|rekrytera|nyanställ|fler (tekniker|mekaniker|montörer|personal)/.test(q)) return 'hiring';
+  if (/har vi råd|råd att|råd med|kan (jag|vi) köpa|köpa .* på företaget|investera i (en|ett|ny|nytt)/.test(q)) return 'affordability';
+  if (/höj(a|er)? pris|prishöjning|sänk(a|er)? pris|vad händer om .*(pris|%)/.test(q)) return 'pricing_scenario';
+  if (/hur mycket måste vi sälja|kvar till (års)?målet|nå (årets |års)?mål/.test(q)) return 'sales_target';
   if (/fått betalt|obetal|betalat|betalning|matcha|förfall/.test(q)) return 'payments_reconciliation';
   if (/likviditet|kassa|betalningsförmåga|buffert/.test(q)) return 'liquidity';
   if (/risk/.test(q)) return 'risk';
@@ -190,8 +198,34 @@ export function classifyIntent(question: string): Intent {
   if (/mål|planen|ligger vi efter|budget|på rätt bana/.test(q)) return 'goals';
   if (/kostnad|lagt.*pengar|utgift|dyrast/.test(q)) return 'costs';
   if (/kund(er)?\b|lönsam|störst/.test(q)) return 'customers';
-  if (/omsättning|resultat|försäljning|marginal|gick det/.test(q)) return 'revenue_result';
+  if (/omsättning|resultat|försäljning|marginal|produktivitet|gick det/.test(q)) return 'revenue_result';
   return 'general';
+}
+
+export const INTENT_DOMAIN: Record<Intent, string> = {
+  payments_reconciliation: 'ekonomi', liquidity: 'ekonomi', revenue_result: 'ekonomi', costs: 'ekonomi',
+  risk: 'risk', decisions: 'mål', actions_effect: 'mål', goals: 'mål', changes: 'mål',
+  customers: 'försäljning', sales_target: 'försäljning', pricing_scenario: 'försäljning',
+  affordability: 'inköp', hiring: 'personal', owner_compensation: 'skatt_ägare', general: 'ekonomi'
+};
+
+/** Extract an amount like "180 000", "1,2 MSEK", "50 000 kr" from free text. */
+export function extractAmount(q: string): number | null {
+  const msek = q.match(/([0-9]+(?:[.,][0-9]+)?)\s*(msek|mkr|miljoner)/i);
+  if (msek) return Math.round(Number(msek[1].replace(',', '.')) * 1_000_000);
+  const tkr = q.match(/([0-9]+(?:[.,][0-9]+)?)\s*tkr/i);
+  if (tkr) return Math.round(Number(tkr[1].replace(',', '.')) * 1_000);
+  const plain = q.match(/([0-9][0-9\s]{2,12})(?:\s*(?:kr|sek|:-))?/i);
+  if (plain) {
+    const n = Number(plain[1].replace(/\s/g, ''));
+    if (Number.isFinite(n) && n >= 1000) return n;
+  }
+  return null;
+}
+
+export function extractPercent(q: string): number | null {
+  const m = q.match(/([0-9]+(?:[.,][0-9]+)?)\s*(%|procent)/i);
+  return m ? Number(m[1].replace(',', '.')) / 100 : null;
 }
 
 interface EvidencePackage {
@@ -201,6 +235,13 @@ interface EvidencePackage {
   sources: string[];
   period: string;
   datapoints: number;
+  missing_data: string[];          // adaptive data acquisition: what's missing & how to provide it
+  requires_human_review: boolean;  // tax/owner and similar decisions
+  confidence: number;              // reasoning-contract confidence 0..1
+}
+
+export function confidenceTier(c: number): 'high' | 'moderate' | 'low' {
+  return c >= 0.85 ? 'high' : c >= 0.6 ? 'moderate' : 'low';
 }
 
 const fmtKr = (n: number) => new Intl.NumberFormat('sv-SE', { maximumFractionDigits: 0 }).format(Math.round(n)) + ' kr';
@@ -211,10 +252,112 @@ function buildEvidencePackage(orgId: string, userId: string | null, intent: Inte
     "SELECT * FROM findings WHERE org_id = ? AND status IN ('open','acknowledged') ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END LIMIT 30", orgId);
   const parts: string[] = [];
   const facts: Record<string, unknown> = {};
+  const missing: string[] = [];
+  let requiresHumanReview = false;
+  // Reasoning contract: confidence starts from data coverage and is reduced
+  // by every missing piece the answer would need.
+  let confidence = pack.dataCoverage.monthsOfHistory >= 6 ? 0.85 : pack.dataCoverage.monthsOfHistory >= 3 ? 0.7 : 0.5;
+  const profile = getProfile(orgId);
   const lastIdx = pack.revenueByMonth.length - 2;
   const lastRev = lastIdx >= 0 ? pack.revenueByMonth[lastIdx] : null;
 
   switch (intent) {
+    case 'affordability': {
+      const amount = extractAmount(question);
+      const liq = computeLiquidity(orgId);
+      facts.requested_amount = amount;
+      if (amount === null) {
+        parts.push('Jag kan bedöma detta, men ange beloppet (t.ex. "180 000 kr") så räknar jag på det.');
+        missing.push('Belopp för inköpet/investeringen');
+        confidence = 0.4;
+        break;
+      }
+      if (liq.startBalance === null) {
+        parts.push(`Jag kan bedöma om ni har råd med ${fmtKr(amount)}, men jag saknar aktuell banklikviditet.`);
+        missing.push('Aktuell kassaposition — ange i verksamhetsprofilen eller koppla ekonomikällan/ladda upp ett kontoutdrag');
+        confidence = 0.45;
+        break;
+      }
+      const minAfter = (liq.minBalance ?? liq.startBalance) - amount;
+      facts.liquidity = { start: liq.startBalance, min_before: liq.minBalance, min_week: liq.minWeek, min_after_purchase: minAfter, buffer_target: liq.bufferTarget };
+      parts.push(`Inköp om ${fmtKr(amount)}: kassan är ${fmtKr(liq.startBalance)} och prognosens lägsta punkt kommande veckor är ${fmtKr(liq.minBalance ?? 0)} (vecka ${liq.minWeek}). Efter inköpet blir lägsta punkten cirka ${fmtKr(minAfter)}.`);
+      if (minAfter < 0) {
+        parts.push('BEDÖMNING: Med nuvarande prognos skulle inköpet leda till negativt kassasaldo. Jag avråder utan förändrad finansiering eller senareläggning.');
+      } else if (liq.bufferTarget !== null && minAfter < liq.bufferTarget) {
+        parts.push(`BEDÖMNING: Inköpet är möjligt men pressar likviditeten under er buffert (${fmtKr(liq.bufferTarget)}). Överväg delbetalning, leasing eller senareläggning — eller driv in förfallna fordringar först (${fmtKr(pack.receivables.overdueTotal)} förfallet).`);
+      } else {
+        parts.push('BEDÖMNING: Inköpet ryms inom likviditeten och bufferten. Jämför gärna totalkostnad över livslängden (inte bara inköpspris) mellan alternativ innan beslut.');
+      }
+      break;
+    }
+    case 'hiring': {
+      const p = computeProductivity(orgId);
+      if (!p.hasData || p.overall.recentRatio === null) {
+        parts.push('Jag kan bedöma bemanningsbehovet, men jag saknar tidsdata (arbetade och debiterade timmar per person).');
+        missing.push('Tidsposter — importera från verkstads-/fältsystemet eller via CSV (kolumner: datum, tekniker, arbetade timmar, debiterade timmar)');
+        confidence = 0.4;
+        break;
+      }
+      facts.productivity = p.overall;
+      const utilization = Math.round(p.overall.recentRatio * 100);
+      if (p.overall.baselineRatio !== null && p.overall.recentRatio < p.overall.baselineRatio * 0.95) {
+        const headroom = Math.round((p.overall.baselineRatio / p.overall.recentRatio - 1) * 100);
+        parts.push(`Jag skulle inte fatta det beslutet ännu. Kapaciteten utnyttjas till ${utilization} % (normalt ${Math.round(p.overall.baselineRatio * 100)} %) de senaste ${p.recentWeeks.length} veckorna.`);
+        parts.push(`Om produktiviteten återgår till normalnivå kan nuvarande bemanning hantera ungefär ${headroom} % mer volym. BEDÖMNING: Utred först varför kapaciteten inte utnyttjas.`);
+      } else {
+        parts.push(`Kapacitetsutnyttjandet är ${utilization} % och ligger på eller över normalnivån. En rekrytering kan vara motiverad — kontrollera att orderingången bär den ökade lönekostnaden (${profile.monthly_payroll ? 'nuvarande lönekostnad ' + fmtKr(Number(profile.monthly_payroll)) + '/mån' : 'ange lönekostnad i profilen för fullständig kalkyl'}).`);
+      }
+      break;
+    }
+    case 'owner_compensation': {
+      requiresHumanReview = true;
+      const liq = computeLiquidity(orgId);
+      const result12 = pack.resultByMonth.reduce((a, p2) => a + p2.value, 0);
+      facts.result_last_12m = Math.round(result12);
+      facts.liquidity = { start: liq.startBalance, min: liq.minBalance, buffer: liq.bufferTarget };
+      if (liq.startBalance === null) missing.push('Aktuell kassaposition (verksamhetsprofilen eller kontoutdrag)');
+      missing.push('Kommande skatter, moms och arbetsgivaravgifter — stäm av mot Skatteverkets konto innan beslut');
+      const available = liq.startBalance !== null && liq.bufferTarget !== null
+        ? Math.max(0, Math.round((liq.minBalance ?? liq.startBalance) - liq.bufferTarget)) : null;
+      parts.push(`Resultatet senaste 12 månaderna är ${fmtKr(result12)}${liq.startBalance !== null ? ` och kassan ${fmtKr(liq.startBalance)}` : ''}.`);
+      if (available !== null) parts.push(`Utrymme ovanför likviditetsbufferten vid prognosens lägsta punkt: cirka ${fmtKr(available)}.`);
+      parts.push('Innan du tar ut ytterligare pengar bör tre saker kontrolleras: (1) kommande skatter och arbetsgivaravgifter, (2) den definierade likviditetsbufferten, (3) hur lön kontra utdelning påverkar din situation i år.');
+      parts.push('Scenarier: A) Lön — påverkar arbetsgivaravgifter och din pensionsgrundande inkomst. B) Utdelning — styrs av regler som förändras (bl.a. gränsbelopp). C) Behåll kapital — stärker bufferten. D) Investera i verksamheten.');
+      parts.push('BEDÖMNING: Detta är beslutsstöd, inte skatterådgivning. Skatteregler förändras — stäm av valet mellan lön och utdelning med er redovisningskonsult innan beslut.');
+      confidence = Math.min(confidence, 0.65);
+      break;
+    }
+    case 'pricing_scenario': {
+      const pct = extractPercent(question) ?? 0.05;
+      const rev12 = pack.revenueByMonth.reduce((a, p2) => a + p2.value, 0);
+      const delta = Math.round(rev12 * pct);
+      facts.scenario = { price_change: pct, revenue_last_12m: Math.round(rev12), effect_at_unchanged_volume: delta };
+      parts.push(`Scenario: prishöjning ${(pct * 100).toFixed(0)} %. Med senaste 12 månadernas volym (${fmtKr(rev12)}) ger det cirka ${fmtKr(delta)} i ytterligare intäkt per år — om volymen är oförändrad.`);
+      parts.push(`ANTAGANDE: Kalkylen antar oförändrad volym. Hur kunderna reagerar på priset (priselasticitet) finns inte i underlaget. Topp 3-kundernas andel är ${pack.customerConcentration.slice(0, 3).map(c => (c.share * 100).toFixed(0) + ' %').join(', ') || 'okänd'} — testa förändringen på nya offerter innan generell höjning.`);
+      confidence = Math.min(confidence, 0.7);
+      break;
+    }
+    case 'sales_target': {
+      const year = String(new Date().getFullYear());
+      const yearGoal = all<{ label: string; target_value: number }>(
+        `SELECT label, target_value FROM goals WHERE org_id = ? AND status='active' AND period='yearly' AND (metric='revenue' OR key='revenue') AND period_start LIKE ?`, orgId, `${year}%`)[0];
+      if (!yearGoal) {
+        parts.push('Det finns inget aktivt omsättningsmål för i år. Skapa ett under Styrning eller importera verksamhetsplanen, så kan jag räkna på vad som krävs.');
+        missing.push('Årsmål för omsättning (Styrning → Mål)');
+        confidence = 0.4;
+        break;
+      }
+      const ytd = pack.revenueByMonth.filter(p2 => p2.period.startsWith(year) && p2.period <= (lastRev?.period ?? '')).reduce((a, p2) => a + p2.value, 0);
+      const monthsLeft = 12 - Number((lastRev?.period ?? `${year}-12`).slice(5, 7));
+      const remaining = yearGoal.target_value - ytd;
+      const perMonth = monthsLeft > 0 ? Math.round(remaining / monthsLeft) : remaining;
+      facts.target = { goal: yearGoal.label, target: yearGoal.target_value, ytd: Math.round(ytd), remaining: Math.round(remaining), months_left: monthsLeft, required_per_month: perMonth };
+      parts.push(`Mål: ${yearGoal.label} — ${fmtKr(yearGoal.target_value)}. Hittills i år: ${fmtKr(ytd)} (t.o.m. ${lastRev?.period}).`);
+      parts.push(remaining <= 0
+        ? 'Målet är redan nått.'
+        : `Kvar: ${fmtKr(remaining)} på ${monthsLeft} månader — det kräver ${fmtKr(perMonth)}/månad, mot nuvarande nivå ${fmtKr(lastRev?.value ?? 0)}/månad.`);
+      break;
+    }
     case 'payments_reconciliation': {
       const supplierFocus = /köpte|inköp|leverantör/.test(question.toLowerCase());
       const kind = supplierFocus ? 'supplier' : 'customer';
@@ -338,24 +481,38 @@ function buildEvidencePackage(orgId: string, userId: string | null, intent: Inte
     }
   }
 
+  if (missing.length) confidence = Math.min(confidence, 0.55);
+
   return {
     intent,
     facts,
     deterministic_answer: parts.join('\n'),
     sources: pack.dataCoverage.sources.map(s => `${s.name} (${s.connector})`),
     period: `${pack.dataCoverage.firstDate ?? '–'} till ${pack.dataCoverage.lastDate ?? '–'}`,
-    datapoints: pack.dataCoverage.txCount + pack.dataCoverage.invoiceCount
+    datapoints: pack.dataCoverage.txCount + pack.dataCoverage.invoiceCount,
+    missing_data: missing,
+    requires_human_review: requiresHumanReview,
+    confidence
   };
 }
 
-export async function askBusiness(orgId: string, userId: string | null, question: string): Promise<{ answer: string; model: string; intent: Intent; evidence: unknown }> {
+export interface AskResult {
+  answer: string; model: string; intent: Intent; domain: string;
+  confidence: number; confidence_tier: 'high' | 'moderate' | 'low';
+  missing_data: string[]; requires_human_review: boolean; evidence: unknown;
+}
+
+export async function askBusiness(orgId: string, userId: string | null, question: string): Promise<AskResult> {
   const intent = classifyIntent(question);
   const pkg = buildEvidencePackage(orgId, userId, intent, question);
   const provider = getProvider();
+  const tier = confidenceTier(pkg.confidence);
 
   let answer: string;
   if (provider.name === 'deterministic') {
-    answer = pkg.deterministic_answer + '\n\n(Svaret är deterministiskt sammanställt från systemets beräknade underlag. Konfigurera en språkmodell för friare analys.)';
+    answer = pkg.deterministic_answer;
+    if (tier === 'low') answer += '\n\nUNDERLAGET ÄR INTE TILLRÄCKLIGT — jag skulle inte fatta beslut på detta ännu.';
+    answer += '\n\n(Svaret är deterministiskt sammanställt från systemets beräknade underlag. Konfigurera en språkmodell för friare analys.)';
   } else {
     // Conversation context: the user's recent exchanges (business context, not chat fluff).
     const history = userId ? all<{ question: string; answer: string }>(
@@ -366,6 +523,8 @@ export async function askBusiness(orgId: string, userId: string | null, question
       history.length ? `Tidigare frågor i samtalet (senaste först):\n${history.map(h => `Q: ${h.question}\nA: ${h.answer.slice(0, 300)}`).join('\n')}` : '',
       `Deterministiskt beräknat evidenspaket för frågan (intent: ${intent}):\n${JSON.stringify(pkg.facts, null, 1)}`,
       `Systemets deterministiska sammanfattning: ${pkg.deterministic_answer}`,
+      pkg.missing_data.length ? `Saknat underlag som måste redovisas för användaren: ${pkg.missing_data.join('; ')}` : '',
+      pkg.requires_human_review ? 'OBS: Detta är ett känsligt beslutsområde (skatt/ägare eller liknande). Svaret ska vara beslutsstöd, aldrig definitiv rådgivning, och hänvisa till professionell kontroll.' : '',
       `Ledningens fråga: "${question}"`,
       'Svara med: (1) direkt svar byggt på evidenspaketet, (2) kort bedömning, (3) vad som är osäkert. Referera siffror exakt som i paketet.'
     ].filter(Boolean).join('\n\n');
@@ -381,7 +540,13 @@ export async function askBusiness(orgId: string, userId: string | null, question
   };
   run('INSERT INTO questions (id, org_id, user_id, question, answer, evidence_json, model, asked_at) VALUES (?,?,?,?,?,?,?,?)',
     uuid(), orgId, userId, question, answer, JSON.stringify(evidence), provider.model, now());
-  return { answer, model: provider.model, intent, evidence };
+  return {
+    answer, model: provider.model, intent,
+    domain: INTENT_DOMAIN[intent],
+    confidence: pkg.confidence, confidence_tier: tier,
+    missing_data: pkg.missing_data, requires_human_review: pkg.requires_human_review,
+    evidence
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +554,8 @@ export async function askBusiness(orgId: string, userId: string | null, question
 // ---------------------------------------------------------------------------
 
 export function morningBrief(orgId: string, userId: string): {
-  greeting: string; status: string | null; items: { severity: string; title: string; id: string }[];
+  greeting: string; intro: string; status: string | null;
+  items: { severity: string; title: string; id: string; domain: string }[];
   assessment: string | null; mode: string;
 } {
   const user = get<{ name: string }>('SELECT name FROM users WHERE id = ?', userId);
@@ -397,13 +563,17 @@ export function morningBrief(orgId: string, userId: string): {
     "SELECT overall_status, summary, narrative FROM analysis_runs WHERE org_id = ? AND status = 'ok' ORDER BY started_at DESC LIMIT 1", orgId);
   const mode = getSetting(orgId, 'reports.mode', userId);
   const findings = all<FindingRow>(
-    "SELECT * FROM findings WHERE org_id = ? AND status IN ('open','acknowledged') AND severity != 'info' ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END LIMIT 3", orgId);
+    "SELECT * FROM findings WHERE org_id = ? AND status IN ('open','acknowledged') AND severity != 'info' ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END LIMIT 4", orgId);
   const hour = new Date().getHours();
   const greeting = `${hour < 10 ? 'God morgon' : hour < 18 ? 'God dag' : 'God kväll'}${user ? ' ' + user.name.split(' ')[0] : ''}.`;
+  const { domainFor } = require('../analysis/engine') as { domainFor(c: string): string };
   return {
     greeting,
+    intro: findings.length
+      ? `Jag har tittat på verksamheten. ${findings.length} ${findings.length === 1 ? 'sak förtjänar' : 'saker förtjänar'} din uppmärksamhet.`
+      : 'Jag har tittat på verksamheten. Inget kräver din uppmärksamhet just nu.',
     status: runInfo?.summary ?? null,
-    items: findings.map(f => ({ severity: f.severity, title: f.title, id: f.id })),
+    items: findings.map(f => ({ severity: f.severity, title: f.title, id: f.id, domain: domainFor(f.category) })),
     assessment: runInfo?.narrative ?? null,
     mode
   };

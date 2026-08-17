@@ -11,6 +11,20 @@ import { dispatchAlertsForFinding } from '../alerts/engine';
 import { generateNarrative } from '../reasoning';
 import { sensitivityMultiplier, suppressBelowFraction } from '../core/settings';
 import { goalTargetForMonth } from '../core/hierarchy';
+import { computeProductivity } from './productivity';
+
+// Guidance domains — the navigator categories. Findings carry a category;
+// the domain is derived so every surface (brief, dashboard, chat) can group
+// information the way an owner thinks, not the way tables are named.
+export const DOMAIN_FOR_CATEGORY: Record<string, string> = {
+  revenue: 'ekonomi', costs: 'ekonomi', liquidity: 'ekonomi', receivables: 'ekonomi',
+  operations: 'drift', staffing: 'personal', purchasing: 'inköp', sales: 'försäljning',
+  marketing: 'marknad', tax_owner: 'skatt_ägare', concentration: 'risk', memory: 'risk',
+  follow_up: 'mål', stability: 'mål', coverage: 'system', discovery: 'system'
+};
+export function domainFor(category: string): string {
+  return DOMAIN_FOR_CATEGORY[category] ?? 'ekonomi';
+}
 
 const fmtKr = (n: number) => new Intl.NumberFormat('sv-SE', { maximumFractionDigits: 0 }).format(Math.round(n)) + ' kr';
 const fmtPct = (n: number) => (n * 100).toFixed(1).replace('.', ',') + ' %';
@@ -104,20 +118,40 @@ function ruleRevenueTrend(orgId: string, pack: MetricPack, drafts: FindingDraft[
   const floor = Math.max(0.12 * m, suppressBelowFraction(orgId));
   const change = (last.value - base) / base;
   if (change < -floor) {
+    // Season awareness: the system learns what "normal" means for THIS
+    // business. If the same month last year dipped similarly against its own
+    // baseline, this is probably rhythm — not an anomaly.
+    let seasonal = false;
+    let seasonalNote: string | null = null;
+    const lyIdx = lastIdx - 12;
+    if (lyIdx >= 3) {
+      const lyPoint = pack.revenueByMonth[lyIdx];
+      const lyBase = trailingAvg(pack.revenueByMonth.slice(0, lyIdx + 1), 1);
+      if (lyPoint && lyBase && lyBase > 0 && lyPoint.value > 0) {
+        const lyChange = (lyPoint.value - lyBase) / lyBase;
+        if (lyChange < -floor * 0.6 && Math.abs(lyChange - change) < 0.12) {
+          seasonal = true;
+          seasonalNote = `Samma månad förra året (${lyPoint.period}) låg ${fmtPct(Math.abs(lyChange))} under sin dåvarande nivå — detta liknar verksamhetens säsongsmönster snarare än en avvikelse.`;
+        }
+      }
+    }
     drafts.push({
       fingerprint: 'revenue_trend_down',
-      severity: change < -0.25 ? 'high' : 'medium',
+      severity: seasonal ? 'low' : (change < -0.25 ? 'high' : 'medium'),
       category: 'revenue',
       epistemic: 'derived',
-      title: `Omsättningstrenden viker — ${fmtPct(Math.abs(change))} under historisk nivå`,
-      description: `Omsättningen ${last.period} (${fmtKr(last.value)}) ligger ${fmtPct(Math.abs(change))} under det glidande sexmånaderssnittet (${fmtKr(base)}).`,
+      title: seasonal
+        ? `Omsättningen är ${fmtPct(Math.abs(change))} under snittet — men följer säsongsmönstret`
+        : `Omsättningstrenden viker — ${fmtPct(Math.abs(change))} under historisk nivå`,
+      description: `Omsättningen ${last.period} (${fmtKr(last.value)}) ligger ${fmtPct(Math.abs(change))} under det glidande sexmånaderssnittet (${fmtKr(base)}).` + (seasonalNote ? ' ' + seasonalNote : ''),
       confidence: baseConfidence(pack) * 0.95,
-      recommended_actions: ['Analysera orderingång och pipeline', 'Jämför med säsongsmönster föregående år'],
-      expected_effect: 'Bekräftad eller avfärdad trendförändring',
+      recommended_actions: seasonal ? [] : ['Analysera orderingång och pipeline', 'Jämför med säsongsmönster föregående år'],
+      expected_effect: seasonal ? undefined : 'Bekräftad eller avfärdad trendförändring',
       period_end: last.period + '-28',
       evidence: [
         { kind: 'fact', label: `Omsättning ${last.period}`, value: fmtKr(last.value), period: last.period, source_label: 'Normaliserade transaktioner' },
-        { kind: 'derived', label: 'Glidande 6-mån-snitt', value: fmtKr(base), calculation: 'Medel av föregående 6 månaders omsättning', data: pack.revenueByMonth }
+        { kind: 'derived', label: 'Glidande 6-mån-snitt', value: fmtKr(base), calculation: 'Medel av föregående 6 månaders omsättning', data: pack.revenueByMonth },
+        ...(seasonalNote ? [{ kind: 'derived' as const, label: 'Säsongsjämförelse', value: seasonalNote, calculation: 'Samma kalendermånad föregående år jämförd mot sitt eget glidande snitt' }] : [])
       ]
     });
   } else if (change > 0.15) {
@@ -271,6 +305,79 @@ function ruleConcentration(orgId: string, pack: MetricPack, drafts: FindingDraft
   });
 }
 
+/** Productivity — decision intelligence on granular time entries.
+ *  Chain: overall drop → concentration → hours normal? → billed-per-worked
+ *  down → assessment → decision basis. */
+function ruleProductivity(orgId: string, drafts: FindingDraft[]): void {
+  const p = computeProductivity(orgId);
+  if (!p.hasData || p.overall.change === null || p.baselineWeeks.length < 4) return;
+  const m = sensitivityMultiplier(orgId);
+  const floor = Math.max(0.05 * m, suppressBelowFraction(orgId));
+  if (p.overall.change >= -floor) return;
+
+  const dropPct = Math.abs(p.overall.change);
+  const worstUnits = p.byUnit.filter(u => u.change !== null && u.change < -floor).slice(0, 2);
+  const worstEmployees = p.byEmployee.filter(e => e.change !== null && e.change < -floor * 1.5).slice(0, 3);
+
+  const chain: string[] = [];
+  chain.push(`Produktiviteten (debiterade/arbetade timmar) har minskat ${fmtPct(dropPct)} de senaste ${p.recentWeeks.length} veckorna (${(p.overall.recentRatio! * 100).toFixed(0)} % mot normalt ${(p.overall.baselineRatio! * 100).toFixed(0)} %).`);
+  if (worstUnits.length) chain.push(`Minskningen är koncentrerad till ${worstUnits.map(u => u.unit).join(' och ')}.`);
+  chain.push(p.overall.hoursNormal
+    ? 'Antalet arbetade timmar är normalt — det är debiterade timmar per arbetad timme som minskat.'
+    : `Även arbetade timmar avviker (${p.overall.workedRecent} h/v mot normalt ${p.overall.workedBaseline} h/v).`);
+  const assessment = p.overall.hoursNormal
+    ? 'Förändringen ser i första hand operativ ut snarare än volymrelaterad.'
+    : 'Förändringen kan vara volymrelaterad — kontrollera orderingång och bemanning.';
+
+  drafts.push({
+    fingerprint: 'productivity_decline',
+    severity: dropPct > 0.12 ? 'high' : 'medium',
+    category: 'operations',
+    epistemic: 'derived',
+    title: `Produktiviteten har minskat ${fmtPct(dropPct)}${worstUnits.length ? ' — koncentrerat till ' + worstUnits.map(u => u.unit).join(', ') : ''}`,
+    description: chain.join(' ') + ' BEDÖMNING: ' + assessment + ' Innan ytterligare bemanning övervägs rekommenderas analys av arbetsflödet.',
+    confidence: 0.85,
+    affected_entities: worstUnits.map(u => ({ type: 'business_unit', name: u.unit })),
+    recommended_actions: [
+      'Analysera arbetsflödet och ordertyperna i de berörda enheterna',
+      'Avvakta bemanningsbeslut tills orsaken är utredd'
+    ],
+    expected_effect: 'Produktivitet tillbaka till normalnivå',
+    evidence: [
+      { kind: 'derived', label: 'Produktivitet senaste 3 veckor', value: (p.overall.recentRatio! * 100).toFixed(0) + ' %', period: p.recentWeeks.join(', '), calculation: 'Summa debiterade timmar / summa arbetade timmar', source_label: 'Tidsposter (person × dag × arbetsorder)', data: p.weeks },
+      { kind: 'derived', label: 'Normalnivå (föregående 6 veckor)', value: (p.overall.baselineRatio! * 100).toFixed(0) + ' %', period: p.baselineWeeks.join(', ') },
+      { kind: 'fact', label: 'Arbetade timmar per vecka', value: `${p.overall.workedRecent} h (normalt ${p.overall.workedBaseline} h)`, source_label: 'Tidsposter' },
+      ...(worstUnits.length ? [{ kind: 'derived' as const, label: 'Koncentration per enhet', value: worstUnits.map(u => `${u.unit}: ${fmtPct(u.change!)}`).join('; '), data: p.byUnit }] : []),
+      ...(worstEmployees.length ? [{ kind: 'derived' as const, label: 'Största förändringar per person', value: worstEmployees.map(e => `${e.name}: ${fmtPct(e.change!)}`).join('; '), data: p.byEmployee, calculation: 'Drill-down: enhet → person → vecka. Underliggande tidsposter finns kvar på dagsnivå.' }] : [])
+    ]
+  });
+}
+
+/** Connector Discovery: repeated manual imports → suggest an integration. */
+function ruleConnectorDiscovery(orgId: string, drafts: FindingDraft[]): void {
+  const cutoff = new Date(Date.now() - 30 * 86400000).toISOString();
+  const rows = all<{ source_id: string; name: string; days: number }>(
+    `SELECT r.source_id as source_id, ds.name as name, COUNT(DISTINCT substr(r.imported_at, 1, 10)) as days
+     FROM raw_records r JOIN data_sources ds ON ds.id = r.source_id
+     WHERE r.org_id = ? AND r.imported_at >= ? AND ds.connector_key IN ('csv','excel')
+     GROUP BY r.source_id HAVING days >= 3`, orgId, cutoff);
+  for (const r of rows) {
+    drafts.push({
+      fingerprint: `connector_discovery:${r.source_id}`,
+      severity: 'info',
+      category: 'discovery',
+      epistemic: 'inference',
+      title: `Återkommande manuell import upptäckt: ${r.name}`,
+      description: `Du har importerat data manuellt till "${r.name}" vid ${r.days} tillfällen den senaste månaden. Det finns sannolikt ett bättre sätt att få in datan automatiskt — en connector mot källsystemet kan byggas eller aktiveras.`,
+      confidence: 0.9,
+      recommended_actions: ['Undersök om källsystemet har API eller export som kan kopplas som connector'],
+      evidence: [
+        { kind: 'fact', label: 'Importtillfällen senaste 30 dagarna', value: String(r.days), source_label: 'Systemets importlogg' }
+      ]
+    });
+  }
+}
+
 /** Follow-up: completed actions whose expected effect has not materialized. */
 function ruleActionFollowUp(orgId: string, pack: MetricPack, drafts: FindingDraft[]): void {
   const doneActions = all<{ id: string; title: string; finding_id: string | null; completed_at: string; expected_effect: string | null }>(
@@ -396,8 +503,10 @@ export async function runAnalysis(orgId: string, opts: { skipNarrative?: boolean
   ruleCostAnomaly(orgId, pack, drafts);
   ruleLiquidity(orgId, pack, drafts);
   ruleConcentration(orgId, pack, drafts);
+  ruleProductivity(orgId, drafts);
   ruleActionFollowUp(orgId, pack, drafts);
   ruleRecurrence(orgId, drafts);
+  ruleConnectorDiscovery(orgId, drafts);
 
   // Stability: when there is data and nothing significant deviates, say so.
   const significant = drafts.filter(d => d.severity !== 'info' && d.category !== 'coverage');

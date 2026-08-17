@@ -47,5 +47,7 @@ export const CANONICAL_DATASETS: DatasetDescriptor[] = [
   { key: 'invoices_supplier', label: 'Leverantörsfakturor' },
   { key: 'customers', label: 'Kunder' },
   { key: 'suppliers', label: 'Leverantörer' },
-  { key: 'employees', label: 'Personal' }
+  { key: 'employees', label: 'Personal' },
+  { key: 'time_entries', label: 'Tidsposter (arbetade/debiterade timmar)' },
+  { key: 'work_orders', label: 'Arbetsorder' }
 ];

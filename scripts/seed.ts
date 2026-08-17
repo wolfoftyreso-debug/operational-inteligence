@@ -217,6 +217,45 @@ async function main(): Promise<void> {
     'Lisa Palm;Ekonomi;', 'Demo Admin;VD;'];
   ingestCsvContent(ctx, { filename: 'personal.csv', content: empLines.join('\n'), dataset: 'employees' });
 
+  // --- Time entries: person × day granularity (Maximum Data Resolution) ---
+  // Built-in decision-intelligence case: the last 3 weeks, two technicians at
+  // Verkstad Syd bill fewer hours per worked hour while worked hours stay
+  // normal → the productivity rule should find, concentrate and explain it.
+  const techs: [string, string][] = [
+    ['Johan Ek', 'Verkstad Nord'], ['Sara Lind', 'Verkstad Nord'], ['Omar Haddad', 'Verkstad Nord'], ['Peter Ståhl', 'Verkstad Nord'],
+    ['Lukas Vall', 'Verkstad Syd'], ['Nina Falk', 'Verkstad Syd'], ['Ali Rezai', 'Verkstad Syd'], ['Erik Brand', 'Verkstad Syd']
+  ];
+  const dippers = new Set(['Lukas Vall', 'Nina Falk']);
+  const teLines: string[] = ['id;datum;tekniker;enhet;arbetsorder;arbetade timmar;debiterade timmar'];
+  const woLines: string[] = ['arbetsorder;beskrivning;kategori;status;kund;öppnad;stängd;enhet'];
+  let teId = 50000; let woNum = 7000;
+  const dayMs = 86400000;
+  for (let back = 70; back >= 1; back--) {
+    const d = new Date(Date.now() - back * dayMs);
+    const dow = d.getUTCDay();
+    if (dow === 0 || dow === 6) continue; // weekdays only
+    const dateStr = d.toISOString().slice(0, 10);
+    const isRecent = back <= 21;
+    for (const [tech, unit] of techs) {
+      const worked = Math.round((7.2 + rnd() * 1.2) * 10) / 10;
+      let ratio = 0.74 + rnd() * 0.10;
+      if (isRecent && dippers.has(tech)) ratio = 0.52 + rnd() * 0.08;
+      const billed = Math.round(worked * ratio * 10) / 10;
+      const wo = `AO-${7000 + Math.floor(rnd() * 300)}`;
+      teLines.push(`${teId++};${dateStr};${tech};${unit};${wo};${String(worked).replace('.', ',')};${String(billed).replace('.', ',')}`);
+    }
+    if (rnd() < 0.5) {
+      const unit = rnd() < 0.5 ? 'Verkstad Nord' : 'Verkstad Syd';
+      const cust = customers[Math.floor(rnd() * customers.length)];
+      const closed = back > 8 ? new Date(d.getTime() + (2 + Math.floor(rnd() * 5)) * dayMs).toISOString().slice(0, 10) : '';
+      woLines.push(`AO-${woNum++};Service och reparation;service;${closed ? 'klar' : 'öppen'};${cust};${dateStr};${closed};${unit}`);
+    }
+  }
+  const teResult = ingestCsvContent(ctx, { filename: 'tidsposter.csv', content: teLines.join('\n'), dataset: 'time_entries' });
+  console.log('Tidsposter importerade:', JSON.stringify(teResult.datasets));
+  const woResult = ingestCsvContent(ctx, { filename: 'arbetsorder.csv', content: woLines.join('\n'), dataset: 'work_orders' });
+  console.log('Arbetsorder importerade:', JSON.stringify(woResult.datasets));
+
   run("UPDATE data_sources SET last_sync_at = ?, last_sync_status = 'ok', status = 'connected' WHERE id = ?", now(), src.id);
 
   // A previous decision + completed action to exercise the memory/feedback loop

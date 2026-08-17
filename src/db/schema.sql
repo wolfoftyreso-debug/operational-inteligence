@@ -322,6 +322,42 @@ CREATE TABLE IF NOT EXISTS questions (
   asked_at TEXT NOT NULL
 );
 
+-- Operational granularity: work orders and per-person/day time entries.
+-- Principle: store data at the highest useful granularity available;
+-- present at the lowest cognitive complexity the role requires.
+CREATE TABLE IF NOT EXISTS work_orders (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  external_id TEXT,
+  title TEXT,
+  category TEXT,
+  status TEXT DEFAULT 'open',      -- open|closed|cancelled
+  unit_id TEXT,
+  customer_name TEXT,
+  opened_date TEXT,
+  closed_date TEXT,
+  source_id TEXT NOT NULL,
+  imported_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wo_ext ON work_orders(org_id, source_id, external_id) WHERE external_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS time_entries (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  external_id TEXT,
+  date TEXT NOT NULL,              -- YYYY-MM-DD
+  employee_id TEXT,
+  employee_name TEXT,
+  unit_id TEXT,
+  work_order_ref TEXT,
+  hours_worked REAL NOT NULL,
+  hours_billed REAL,
+  source_id TEXT NOT NULL,
+  imported_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_te_ext ON time_entries(org_id, source_id, external_id) WHERE external_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_te_date ON time_entries(org_id, date);
+
 -- Hierarchical configuration: org defaults + user overrides.
 -- Resolution order: user → org → system default (in code).
 CREATE TABLE IF NOT EXISTS settings (

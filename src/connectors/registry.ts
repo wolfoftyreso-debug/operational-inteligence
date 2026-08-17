@@ -11,6 +11,19 @@ import { encryptSecret, decryptSecret } from '../core/crypto';
 
 const CONNECTORS: Connector[] = [fortnoxConnector, vismaConnector, csvConnector, excelConnector, genericApiConnector];
 
+// Connector roadmap tiers: Tier 1 built-in, Tier 2 built on first customer
+// need, Tier 3 niche vertical systems. Until a connector exists, the same
+// data flows in via CSV/Excel/Generic API (Tier 4) — every customer can be
+// onboarded immediately, and the adapter flywheel turns manual imports into
+// reusable connectors.
+export const PLANNED_CONNECTORS: { key: string; name: string; category: string; tier: number; note: string }[] = [
+  { key: 'hogia', name: 'Hogia', category: 'Ekonomi', tier: 2, note: 'Byggs vid kundbehov — API-partnerskap' },
+  { key: 'bjorn-lunden', name: 'Björn Lundén', category: 'Ekonomi', tier: 2, note: 'Byggs vid kundbehov — API finns' },
+  { key: 'fieldly', name: 'Fieldly', category: 'Fält/Projekt', tier: 2, note: 'Projekt, arbetsorder, tid, material' },
+  { key: 'bygglet', name: 'Bygglet', category: 'Bygg/Projekt', tier: 2, note: 'Projekt, arbetsorder, tid' },
+  { key: 'winassist', name: 'Winassist', category: 'Verkstad', tier: 3, note: 'Arbetsorder, tid, reservdelar, planering' }
+];
+
 export function listConnectors(): Connector[] {
   return CONNECTORS;
 }

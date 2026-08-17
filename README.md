@@ -1,6 +1,9 @@
 # Operational Intelligence — beta
 
-Ett intelligent lednings- och vägledningslager ovanpå verksamhetens befintliga system.
+**Ett företags operativsystem för människor som inte vill vara företagsledare.**
+Elektrikern vill vara elektriker. Verkstadsägaren vill driva verkstad. Systemet
+tar företagets fragmenterade information och hjälper ägaren fatta bättre beslut
+— decision intelligence, inte BI.
 
 > **System of understanding & system of guidance — inte system of record.**
 > Fortnox fortsätter vara Fortnox. Visma fortsätter vara Visma. Det här systemet samlar in, normaliserar, analyserar, bedömer, rekommenderar och följer upp.
@@ -10,7 +13,37 @@ Kärnprinciper genom hela kodbasen:
 ```
 DATA → UNDERSTANDING → ASSESSMENT → GUIDANCE → FEEDBACK
 ONE BUSINESS → ONE REALITY MODEL → MANY MANAGEMENT VIEWS
+MAXIMUM DATA RESOLUTION, MINIMUM COGNITIVE LOAD
+NEVER OPTIMIZE FOR HAVING THE MOST DATA — OPTIMIZE FOR THE BEST DECISION CONTEXT
 ```
+
+## Decision intelligence (v0.3)
+
+**Granularitet.** Data lagras på högsta användbara upplösning — tidsposter per
+person × dag × arbetsorder, arbetsorder, transaktioner — och presenteras på
+lägsta kognitiva komplexitet per roll: Executive (tolkar), Management
+(diagnostiserar, Drift-vyn), Operations (underlaget). Produktivitetsregeln
+visar kedjan: total nedgång → koncentration per enhet → arbetade timmar
+normala → debiterat/arbetat ner → bedömning → beslutsunderlag, med drill-down
+till person i evidensen.
+
+**Ägarens beslut i chatten.** Intents för *har vi råd* (likviditetseffekt av
+inköp), *anställa* (konstruktiv friktion: "kapaciteten utnyttjas till 73 % —
+utred först varför"), *lön/utdelning* (scenarier A–D, alltid flaggad för
+mänsklig granskning — beslutsstöd, aldrig skatterådgivning), *prisscenario*
+och *säljmål mot årsmålet*. Varje svar bär en reasoning contract:
+confidence-nivå (HIGH/MODERATE/LOW), saknat underlag med anvisning hur det
+tillförs (adaptive data acquisition), och "UNDERLAGET ÄR INTE TILLRÄCKLIGT —
+jag skulle inte fatta beslut på detta ännu" när det gäller. Modellen är aldrig
+databasen: den får ett deterministiskt beräknat evidenspaket per fråga.
+
+**Rytm, inte larm.** Trendregeln jämför med samma månad föregående år — "detta
+liknar verksamhetens säsongsmönster snarare än en avvikelse" — och nedgraderar
+i stället för att skrika. Connector Discovery ser återkommande manuella
+importer och föreslår integration (adapter-flywheel). Connectorkatalogen visar
+Tier 1 (byggda) och planerade Tier 2/3 (Hogia, Björn Lundén, Fieldly, Bygglet,
+Winassist). Onboardingen börjar med "Vad driver du?" och "Vad vill du ha hjälp
+med?" — värde först, administration sedan.
 
 ## Arkitekturprinciper (tillägg v0.2)
 

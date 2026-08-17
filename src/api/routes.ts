@@ -14,8 +14,10 @@ import { generateReport, listReports, getReport, REPORT_TYPES, type ReportType }
 import { listAlerts, markAlertRead } from '../alerts/engine';
 import {
   listConnectors, getConnector, createDataSource, getDataSource, listDataSources,
-  readSourceConfig, makeContext, runSync, disconnectSource, purgeSource
+  readSourceConfig, makeContext, runSync, disconnectSource, purgeSource, PLANNED_CONNECTORS
 } from '../connectors/registry';
+import { computeProductivity } from '../analysis/productivity';
+import { domainFor } from '../analysis/engine';
 import { ingestCsvContent } from '../connectors/csv';
 import { ingestExcelContent } from '../connectors/excel';
 import { fortnoxAuthorizeUrl, fortnoxExchangeCode } from '../connectors/fortnox';
@@ -36,13 +38,18 @@ function bad(res: Response, msg: string, code = 400): void {
 // ---------------------------------------------------------------------------
 
 router.post('/auth/register-org', (req: Request, res: Response) => {
-  const { org_name, email, name, password, industry } = req.body ?? {};
+  const { org_name, email, name, password, industry, vertical, focus_areas } = req.body ?? {};
   if (!org_name || !email || !password || !name) return bad(res, 'org_name, name, email och password krävs');
   if (String(password).length < 8) return bad(res, 'Lösenordet måste vara minst 8 tecken');
   if (get('SELECT id FROM users WHERE email = ?', String(email).toLowerCase())) return bad(res, 'E-postadressen används redan');
   const orgId = uuid();
   run('INSERT INTO organizations (id, name, industry, rss_token, created_at) VALUES (?,?,?,?,?)',
-    orgId, org_name, industry || 'general', randomToken(), now());
+    orgId, org_name, vertical || industry || 'general', randomToken(), now());
+  // Onboarding: what do you run, and what do you want help with? Value first.
+  if (vertical) run('INSERT INTO business_profile (org_id, key, value, updated_at) VALUES (?,?,?,?)', orgId, 'vertical', String(vertical), now());
+  if (Array.isArray(focus_areas) && focus_areas.length) {
+    run('INSERT INTO business_profile (org_id, key, value, updated_at) VALUES (?,?,?,?)', orgId, 'focus_areas', focus_areas.join(','), now());
+  }
   const userId = uuid();
   run('INSERT INTO users (id, org_id, email, name, role, password_hash, created_at) VALUES (?,?,?,?,?,?,?)',
     userId, orgId, String(email).toLowerCase(), name, 'admin', hashPassword(password), now());
@@ -231,7 +238,7 @@ router.post('/analyze', requireAuth, async (req: Request, res: Response) => {
 
 function mapFinding(f: FindingRow): Record<string, unknown> {
   return {
-    id: f.id, severity: f.severity, category: f.category, epistemic: f.epistemic,
+    id: f.id, severity: f.severity, category: f.category, domain: domainFor(f.category), epistemic: f.epistemic,
     title: f.title, description: f.description, confidence: f.confidence,
     affected_entities: JSON.parse(f.affected_entities_json ?? '[]'),
     recommended_actions: JSON.parse(f.recommended_actions_json ?? '[]'),
@@ -415,11 +422,18 @@ router.get('/reports/:id', requireAuth, (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 
 router.get('/connectors', requireAuth, (req: Request, res: Response) => {
-  res.json(listConnectors().map(c => ({
-    key: c.key, name: c.name, description: c.description, auth_kind: c.authKind,
-    datasets: c.datasets, config_fields: c.configFields.map(f => ({ ...f })),
-    availability: c.available()
-  })));
+  res.json({
+    available: listConnectors().map(c => ({
+      key: c.key, name: c.name, description: c.description, auth_kind: c.authKind,
+      datasets: c.datasets, config_fields: c.configFields.map(f => ({ ...f })),
+      availability: c.available()
+    })),
+    planned: PLANNED_CONNECTORS
+  });
+});
+
+router.get('/productivity', requireAuth, (req: Request, res: Response) => {
+  res.json(computeProductivity(req.user!.org_id));
 });
 
 router.get('/sources', requireAuth, (req: Request, res: Response) => {
