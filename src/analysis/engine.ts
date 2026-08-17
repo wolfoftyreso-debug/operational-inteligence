@@ -9,6 +9,8 @@ import { computeLiquidity } from './liquidity';
 import { listSourceLabels } from '../ingest/normalize';
 import { dispatchAlertsForFinding } from '../alerts/engine';
 import { generateNarrative } from '../reasoning';
+import { sensitivityMultiplier, suppressBelowFraction } from '../core/settings';
+import { goalTargetForMonth } from '../core/hierarchy';
 
 const fmtKr = (n: number) => new Intl.NumberFormat('sv-SE', { maximumFractionDigits: 0 }).format(Math.round(n)) + ' kr';
 const fmtPct = (n: number) => (n * 100).toFixed(1).replace('.', ',') + ' %';
@@ -37,15 +39,24 @@ function srcEvidence(orgId: string): EvidenceItem {
 // ---------------------------------------------------------------------------
 
 function ruleRevenueVsPlan(orgId: string, pack: MetricPack, drafts: FindingDraft[]): void {
-  const profile = getProfile(orgId);
-  const budget = profileNumber(profile, 'monthly_revenue_target');
-  if (budget === null || budget <= 0) return;
   const lastIdx = pack.revenueByMonth.length - 2; // last complete month
   if (lastIdx < 0) return;
   const last = pack.revenueByMonth[lastIdx];
   if (last.value === 0) return;
+  // Plan source priority: active goal for the month (Organizational Context
+  // Graph) → manual profile target. The goal is the governing truth.
+  const monthGoal = goalTargetForMonth(orgId, 'revenue', last.period);
+  const profile = getProfile(orgId);
+  const profileTarget = profileNumber(profile, 'monthly_revenue_target');
+  const budget = monthGoal ? monthGoal.target : profileTarget;
+  const budgetSource = monthGoal
+    ? `Mål: ${monthGoal.goal.label} (${monthGoal.goal.source === 'document' ? 'styrande dokument' : monthGoal.goal.source === 'breakdown' ? 'nedbrutet årsmål' : 'manuellt mål'})`
+    : 'Verksamhetsprofil (manuell uppgift)';
+  if (budget === null || budget <= 0) return;
+  const m = sensitivityMultiplier(orgId);
+  const floor = Math.max(0.05 * m, suppressBelowFraction(orgId));
   const dev = (last.value - budget) / budget;
-  if (dev < -0.05) {
+  if (dev < -floor) {
     // Where is the deviation concentrated?
     const unitDevs = pack.revenueByUnit.map(u => {
       const cur = u.months[lastIdx]?.value ?? 0;
@@ -75,7 +86,7 @@ function ruleRevenueVsPlan(orgId: string, pack: MetricPack, drafts: FindingDraft
       period_end: last.period + '-28',
       evidence: [
         { kind: 'fact', label: `Omsättning ${last.period}`, value: fmtKr(last.value), period: last.period, source_label: 'Normaliserade transaktioner', data: pack.revenueByMonth },
-        { kind: 'fact', label: 'Månatligt omsättningsmål', value: fmtKr(budget), source_label: 'Verksamhetsprofil (manuell uppgift)' },
+        { kind: 'fact', label: 'Månatligt omsättningsmål', value: fmtKr(budget), source_label: budgetSource },
         { kind: 'derived', label: 'Avvikelse mot plan', value: fmtPct(dev), calculation: `(${fmtKr(last.value)} − ${fmtKr(budget)}) / ${fmtKr(budget)}` },
         ...(worst ? [{ kind: 'derived' as const, label: `Avvikelse ${worst.unit}`, value: fmtPct(worst.drop), calculation: 'Senaste månad jämfört med 6 månaders glidande medel för enheten', data: unitDevs }] : [])
       ]
@@ -89,8 +100,10 @@ function ruleRevenueTrend(orgId: string, pack: MetricPack, drafts: FindingDraft[
   const last = pack.revenueByMonth[lastIdx];
   const base = trailingAvg(pack.revenueByMonth, pack.revenueByMonth.length - lastIdx);
   if (base === null || base <= 0 || last.value === 0) return;
+  const m = sensitivityMultiplier(orgId);
+  const floor = Math.max(0.12 * m, suppressBelowFraction(orgId));
   const change = (last.value - base) / base;
-  if (change < -0.12) {
+  if (change < -floor) {
     drafts.push({
       fingerprint: 'revenue_trend_down',
       severity: change < -0.25 ? 'high' : 'medium',
@@ -129,8 +142,9 @@ function ruleRevenueTrend(orgId: string, pack: MetricPack, drafts: FindingDraft[
 function ruleReceivables(orgId: string, pack: MetricPack, drafts: FindingDraft[]): void {
   const r = pack.receivables;
   if (r.openTotal <= 0) return;
+  const m = sensitivityMultiplier(orgId);
   const overdueShare = r.overdueTotal / r.openTotal;
-  if (r.overdueTotal > 0 && overdueShare > 0.25) {
+  if (r.overdueTotal > 0 && overdueShare > 0.25 * m) {
     const top = r.topDebtors.filter(d => d.overdue > 0).slice(0, 3);
     drafts.push({
       fingerprint: 'receivables_overdue',
@@ -159,12 +173,14 @@ function ruleReceivables(orgId: string, pack: MetricPack, drafts: FindingDraft[]
 function ruleCostAnomaly(orgId: string, pack: MetricPack, drafts: FindingDraft[]): void {
   const lastIdx = pack.months.length - 2;
   if (lastIdx < 3) return;
+  const m = sensitivityMultiplier(orgId);
+  const floor = Math.max(0.30 * m, suppressBelowFraction(orgId));
   for (const cat of pack.costByCategory) {
     const cur = cat.months[lastIdx]?.value ?? 0;
     const base = trailingAvg(cat.months, cat.months.length - lastIdx);
     if (base === null || base < 5000) continue;
     const change = (cur - base) / base;
-    if (change > 0.30 && cur - base > 10000) {
+    if (change > floor && cur - base > 10000 * m) {
       drafts.push({
         fingerprint: `cost_anomaly:${cat.category}`,
         severity: change > 0.6 ? 'high' : 'medium',

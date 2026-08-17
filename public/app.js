@@ -67,12 +67,14 @@
 
   const NAV = [
     { hash: '#/', label: 'Verksamhetsläge', ico: '◉', min: 0 },
-    { hash: '#/findings', label: 'Observationer', ico: '☰', min: 0 },
     { hash: '#/ask', label: 'Fråga verksamheten', ico: '?', min: 1 },
+    { hash: '#/findings', label: 'Observationer', ico: '☰', min: 0 },
     { hash: '#/liquidity', label: 'Likviditet', ico: '≈', min: 2 },
     { hash: '#/actions', label: 'Åtgärder & beslut', ico: '✓', min: 1 },
+    { hash: '#/governance', label: 'Styrning', ico: '§', min: 3 },
     { hash: '#/reports', label: 'Rapporter', ico: '▤', min: 2 },
     { hash: '#/alerts', label: 'Alerts', ico: '!', min: 0, badge: () => UNREAD },
+    { hash: '#/settings', label: 'Kontrollcenter', ico: '⌘', min: 0 },
     { hash: '#/integrations', label: 'Integrationer', ico: '⇄', admin: true },
     { hash: '#/profile', label: 'Verksamhetsprofil', ico: '▦', min: 3 },
     { hash: '#/admin', label: 'Administration', ico: '⚙', admin: true }
@@ -167,12 +169,11 @@
   // ---------- dashboard ----------
 
   async function dashboardView() {
-    const [status, metrics] = await Promise.all([api('/status'), api('/metrics')]);
+    const [status, metrics, changes] = await Promise.all([api('/status'), api('/metrics'), api('/changes')]);
     UNREAD = status.unread_alerts;
     const sm = STATUS_META[status.overall_status] || STATUS_META.stable;
     const lastIdx = metrics.revenueByMonth.length - 2;
     const rev = lastIdx >= 0 ? metrics.revenueByMonth[lastIdx] : null;
-    const cost = lastIdx >= 0 ? metrics.costsByMonth[lastIdx] : null;
     const result = lastIdx >= 0 ? metrics.resultByMonth[lastIdx] : null;
     const prevRev = lastIdx >= 1 ? metrics.revenueByMonth[lastIdx - 1] : null;
     const revDelta = rev && prevRev && prevRev.value ? (rev.value - prevRev.value) / prevRev.value : null;
@@ -186,56 +187,102 @@
       catch (ex) { toast(ex.message); e.target.disabled = false; e.target.textContent = 'Kör ny analys'; }
     } }, 'Kör ny analys');
 
-    return h('div', {},
+    const clock = new Date().toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
+    const syncT = status.last_sync_at ? new Date(status.last_sync_at).toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' }) : '—';
+    const avgConf = important.length ? Math.round(important.reduce((a, f) => a + f.confidence, 0) / important.length * 100) : null;
+
+    const root = h('div', {},
+      h('div', { class: 'tech-row', style: 'justify-content:space-between;margin-bottom:4px' },
+        h('span', { class: 'tech' }, h('b', {}, ME.org.name.toUpperCase()), ' / OPERATIONS'),
+        h('span', { class: 'tech' }, h('span', { class: 'live-dot' }), 'LIVE ' + clock + '  ·  SYNCED ' + syncT + '  ·  ' + status.sources + ' ' + (status.sources === 1 ? 'SOURCE' : 'SOURCES'))),
+
       h('div', { class: 'page-head' },
         h('div', {}, h('h1', {}, 'Verksamhetsläge'),
           h('div', { class: 'sub' }, status.last_analysis_at ? 'Senaste analys: ' + dt(status.last_analysis_at) : 'Ingen analys har körts ännu.')),
         analyzeBtn),
 
-      h('div', { class: 'status-banner ' + status.overall_status },
-        h('div', { class: 'status-label' }, 'Övergripande status'),
-        h('div', { class: 'status-title' }, sm.label),
-        h('div', { class: 'status-sub' }, status.summary || sm.sub)),
+      h('div', { class: 'condition ' + status.overall_status },
+        h('div', { class: 'tech' }, 'OPERATIONAL CONDITION'),
+        h('div', { class: 'c-word' }, sm.label.toUpperCase()),
+        h('div', { class: 'c-sub' }, status.summary || sm.sub),
+        h('div', { class: 'tech-row', style: 'margin-top:12px' },
+          h('span', { class: 'tech' }, important.length + ' OBSERVATIONER'),
+          avgConf !== null ? h('span', { class: 'tech' }, 'CONFIDENCE ' + avgConf + '%') : null,
+          status.hidden_low_confidence > 0 ? h('span', { class: 'tech' }, status.hidden_low_confidence + ' DOLDA (LÅG CONFIDENCE)') : null,
+          h('span', { class: 'tech' }, (status.narrative_model || 'DETERMINISTIC').toUpperCase()))),
 
-      h('div', { class: 'grid kpis' },
-        kpiCard('Omsättning' + (rev ? ' · ' + rev.period : ''), rev ? kr(rev.value) : '–',
-          revDelta !== null ? { text: (revDelta >= 0 ? '+' : '') + (revDelta * 100).toFixed(1) + ' % mot föreg. månad', dir: revDelta >= 0 ? 'up' : 'down' } : null),
-        kpiCard('Resultat' + (result ? ' · ' + result.period : ''), result ? kr(result.value) : '–', null),
-        kpiCard('Kundfordringar', kr(metrics.receivables.openTotal),
-          metrics.receivables.overdueTotal > 0 ? { text: kr(metrics.receivables.overdueTotal) + ' förfallet', dir: 'down' } : { text: 'Inget förfallet', dir: 'up' }),
-        kpiCard('Leverantörsskulder', kr(metrics.payables.openTotal), null)),
+      h('div', { class: 'grid kpis', id: 'kpi-strip' },
+        kpiCard('OMSÄTTNING' + (rev ? ' · ' + rev.period : ''), rev ? { raw: rev.value, fmt: kr } : '–',
+          revDelta !== null ? { text: (revDelta >= 0 ? '+' : '−') + Math.abs(revDelta * 100).toFixed(1) + '% MOT FÖREG', dir: revDelta >= 0 ? 'up' : 'down' } : null),
+        kpiCard('RESULTAT' + (result ? ' · ' + result.period : ''), result ? { raw: result.value, fmt: kr } : '–', null),
+        kpiCard('KUNDFORDRINGAR', { raw: metrics.receivables.openTotal, fmt: kr },
+          metrics.receivables.overdueTotal > 0 ? { text: kr(metrics.receivables.overdueTotal) + ' FÖRFALLET', dir: 'down' } : { text: 'INGET FÖRFALLET', dir: 'up' }),
+        kpiCard('LEVERANTÖRSSKULDER', { raw: metrics.payables.openTotal, fmt: kr }, null)),
 
       h('div', { class: 'grid two' },
-        h('div', { class: 'card' },
-          h('h2', {}, 'Omsättning och kostnader'),
-          h('div', { class: 'muted', style: 'margin-bottom:10px' }, 'Per månad, senaste 13 månader'),
-          h('div', { class: 'chart-box' }, lineChart([
-            { label: 'Omsättning', color: '#1d4e6e', points: metrics.revenueByMonth, area: true },
-            { label: 'Kostnader', color: '#b3362b', points: metrics.costsByMonth }
-          ]))),
-        h('div', { class: 'card' },
-          h('h2', {}, 'Resultat per månad'),
-          h('div', { class: 'muted', style: 'margin-bottom:10px' }, 'Omsättning minus kostnader'),
-          h('div', { class: 'chart-box' }, barChart(metrics.resultByMonth)))),
+        chartCard('Omsättning och kostnader', 'PER MÅNAD · ' + metrics.months.length + ' MÅN', lineChart([
+          { label: 'Omsättning', color: '#12507b', points: metrics.revenueByMonth, area: true },
+          { label: 'Kostnader', color: '#ab3226', points: metrics.costsByMonth }
+        ])),
+        chartCard('Resultat per månad', 'OMSÄTTNING − KOSTNADER', barChart(metrics.resultByMonth))),
+
+      h('div', { class: 'card tight' },
+        h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'WHAT CHANGED'),
+        changes.length ? changes.map(c => h('div', { class: 'change-row' },
+          h('span', { class: 't' }, new Date(c.at).toLocaleDateString('sv-SE', { day: '2-digit', month: '2-digit' })),
+          h('span', { class: 'k' }, c.kind),
+          c.ref ? h('a', { href: '#/finding/' + c.ref, style: 'color:inherit;text-decoration:none' }, c.text) : h('span', {}, c.text)))
+        : h('div', { class: 'muted' }, 'Inga registrerade förändringar ännu.')),
 
       h('div', { class: 'section-title' }, 'Viktigaste observationerna'),
-      important.length
-        ? important.map(findingCard)
-        : h('div', { class: 'card empty' }, 'Inga väsentliga avvikelser. ', infoFindings.length ? 'Se informationsposter nedan.' : ''),
-      infoFindings.length ? h('div', { class: 'section-title' }, 'Information') : null,
-      infoFindings.map(findingCard),
+      h('div', { id: 'findings-seq' },
+        important.length
+          ? important.map(findingCard)
+          : h('div', { class: 'card empty' }, 'Inga väsentliga avvikelser.'),
+        infoFindings.length ? h('div', { class: 'section-title' }, 'Information') : null,
+        infoFindings.map(findingCard)),
 
       status.narrative ? h('div', { class: 'card' },
-        h('h2', {}, 'Ledningsbedömning'),
-        h('div', { class: 'answer', style: 'margin-top:8px' }, status.narrative),
-        h('div', { class: 'muted', style: 'margin-top:10px' }, 'Genererad av: ' + (status.narrative_model || 'okänd modell'))) : null
+        h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'MANAGEMENT ASSESSMENT'),
+        h('div', { class: 'answer' }, status.narrative),
+        h('div', { class: 'hairline' }),
+        h('div', { class: 'btnrow' },
+          h('a', { class: 'btn secondary', href: '#/findings' }, 'Visa evidens'),
+          h('a', { class: 'btn secondary', href: '#/ask' }, 'Fråga verksamheten')),
+        h('div', { class: 'tech', style: 'margin-top:10px' }, 'GENERATED BY ' + (status.narrative_model || 'DETERMINISTIC').toUpperCase())) : null
     );
+
+    // Informational motion: numbers count up, charts draw, findings reveal.
+    const strip = root.querySelector('#kpi-strip');
+    if (strip) Motion.onVisible(strip, () => {
+      strip.querySelectorAll('[data-count]').forEach(el => {
+        Motion.countUp(el, Number(el.dataset.count), v => kr(v), 650);
+      });
+    });
+    root.querySelectorAll('.chart-box svg').forEach(svg => {
+      svg.classList.add('chart-pending');
+      Motion.onVisible(svg.closest('.card') || svg, () => Motion.drawChart(svg, 850));
+    });
+    const seq = root.querySelector('#findings-seq');
+    if (seq) Motion.revealSeq(seq, '.finding', 70);
+    return root;
+  }
+
+  function chartCard(title, techLabel, svg) {
+    return h('div', { class: 'card' },
+      h('h2', {}, title),
+      h('div', { class: 'tech', style: 'margin-bottom:10px' }, techLabel),
+      h('div', { class: 'chart-box' }, svg));
   }
 
   function kpiCard(label, value, delta) {
+    const isAnimated = value && typeof value === 'object' && 'raw' in value;
+    const valEl = isAnimated
+      ? h('div', { class: 'value', 'data-count': String(value.raw) }, Motion.reduced ? value.fmt(value.raw) : value.fmt(0))
+      : h('div', { class: 'value' }, value);
     return h('div', { class: 'kpi' },
       h('div', { class: 'label' }, label),
-      h('div', { class: 'value' }, value),
+      valEl,
       delta ? h('div', { class: 'delta ' + delta.dir }, delta.text) : null);
   }
 
@@ -343,43 +390,71 @@
   // ---------- ask ----------
 
   async function askView() {
-    const history = await api('/ask/history');
-    const answerBox = h('div');
-    const examples = ['Varför har resultatet försämrats?', 'Vad har förändrats sedan förra månaden?', 'Vilka kunder påverkar likviditeten mest?', 'Vad är den största risken just nu?', 'Vad beslutade vi förra månaden?', 'Vilka åtgärder gav faktisk effekt?'];
+    const [brief, history] = await Promise.all([api('/brief'), api('/ask/history')]);
+    const thread = h('div', { class: 'chat-thread' });
+    const examples = ['Har vi fått betalt för allt vi köpte in förra månaden?', 'Vilka kunder påverkar likviditeten mest?', 'Hur ligger vi till mot våra mål?', 'Vad är den största risken just nu?', 'Vad har vi lagt mest pengar på?', 'Vilka åtgärder gav faktisk effekt?'];
 
-    const form = h('form', { onsubmit: async e => {
-      e.preventDefault();
-      const q = new FormData(e.target).get('q');
-      if (!q) return;
-      answerBox.replaceChildren(h('div', { class: 'card' }, h('div', { class: 'muted' }, 'Analyserar…')));
+    function answerBlock(q, r) {
+      return h('div', {},
+        h('div', { class: 'chat-q' }, q),
+        h('div', { class: 'chat-a' },
+          h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'BUSINESS INTELLIGENCE · INTENT ' + (r.intent || '—').toUpperCase().replace(/_/g, ' ')),
+          h('div', { class: 'answer' }, r.answer),
+          h('details', { class: 'evidence-drawer' },
+            h('summary', {}, '▸ Underlag — ' + (r.evidence.datapoints ?? '?') + ' datapunkter · ' + ((r.evidence.sources || []).join(', ') || 'manuell data')),
+            h('div', { class: 'muted', style: 'margin-top:6px' }, 'Period: ' + r.evidence.period + ' · Modell: ' + r.model),
+            h('pre', {}, JSON.stringify(r.evidence.facts ?? r.evidence, null, 2))),
+          h('div', { class: 'btnrow', style: 'margin-top:10px' },
+            h('button', { class: 'ghost', style: 'font-size:12px;padding:4px 10px', onclick: async () => {
+              const title = prompt('Åtgärdens titel:', q.slice(0, 60));
+              if (!title) return;
+              try { await api('/actions', { method: 'POST', body: { title } }); toast('Åtgärd skapad', true); }
+              catch (ex) { toast(ex.message); }
+            } }, 'Skapa åtgärd'))));
+    }
+
+    async function submit(q) {
+      const pending = h('div', { class: 'chat-a' }, h('div', { class: 'tech' }, 'ANALYSERAR…'));
+      thread.append(h('div', { class: 'chat-q' }, q), pending);
+      pending.scrollIntoView({ behavior: Motion.reduced ? 'auto' : 'smooth', block: 'end' });
       try {
         const r = await api('/ask', { method: 'POST', body: { question: q } });
-        answerBox.replaceChildren(h('div', { class: 'card' },
-          h('h2', {}, q),
-          h('div', { class: 'answer', style: 'margin-top:10px' }, r.answer),
-          h('div', { class: 'divider' }),
-          h('div', { class: 'muted' }, 'Underlag: ' + (r.evidence.sources.join(', ') || 'manuell data') +
-            ' · Period: ' + r.evidence.period + ' · ' + r.evidence.datapoints + ' datapunkter · Modell: ' + r.model)));
-      } catch (ex) { answerBox.replaceChildren(h('div', { class: 'error-msg' }, ex.message)); }
-    } },
-      h('div', { style: 'display:flex;gap:8px' },
-        h('input', { name: 'q', placeholder: 'Ställ en fråga om verksamheten…', style: 'flex:1' }),
-        h('button', {}, 'Fråga')));
+        pending.previousSibling.remove(); pending.remove();
+        const block = answerBlock(q, r);
+        thread.append(block);
+        block.scrollIntoView({ behavior: Motion.reduced ? 'auto' : 'smooth', block: 'end' });
+      } catch (ex) { pending.replaceChildren(h('div', { class: 'error-msg' }, ex.message)); }
+    }
+
+    const input = h('input', { name: 'q', placeholder: 'Ställ en fråga om verksamheten…', style: 'flex:1' });
+    const form = h('form', { onsubmit: e => { e.preventDefault(); const q = input.value.trim(); if (q) { input.value = ''; submit(q); } } },
+      h('div', { style: 'display:flex;gap:8px' }, input, h('button', {}, 'Fråga')));
+
+    const briefCard = h('div', { class: 'card brief' },
+      h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'DAILY BRIEF · ' + (brief.mode || '').toUpperCase().replace('_', ' ')),
+      h('h2', {}, brief.greeting),
+      brief.status ? h('p', { class: 'small', style: 'color:var(--ink-soft);margin-top:4px' }, brief.status) : null,
+      brief.items.length ? h('div', { style: 'margin-top:10px' },
+        brief.items.map((it, i) => h('a', { href: '#/finding/' + it.id, style: 'display:block;text-decoration:none;color:inherit;padding:6px 0;border-bottom:1px solid var(--hairline)' },
+          h('span', { class: 'tech', style: 'margin-right:10px' }, String(i + 1).padStart(2, '0')),
+          h('span', { class: 'tag ' + it.severity }, SEV_LABEL[it.severity]), ' ',
+          h('span', { class: 'small' }, it.title))))
+      : h('p', { class: 'muted', style: 'margin-top:8px' }, 'Inget kräver din uppmärksamhet just nu.'));
+    Motion.revealSeq(briefCard, 'a', 90);
 
     return h('div', {},
       h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Fråga verksamheten'),
-        h('div', { class: 'sub' }, 'Svar med analys och evidens, byggda på systemets normaliserade data och findings.'))),
+        h('div', { class: 'sub' }, 'Fråga → intent → datahämtning → deterministisk beräkning → evidens → svar. Samma sanningsmodell som dashboarden.'))),
+      briefCard,
       h('div', { class: 'card' }, form,
-        h('div', { style: 'margin-top:12px;display:flex;gap:6px;flex-wrap:wrap' },
-          examples.map(x => h('button', { class: 'ghost', style: 'font-size:12px;padding:5px 10px', onclick: e => {
-            e.target.closest('.card').querySelector('input[name=q]').value = x;
-          } }, x)))),
-      answerBox,
+        h('div', { style: 'margin-top:10px;display:flex;gap:6px;flex-wrap:wrap' },
+          examples.map(x => h('button', { class: 'ghost', style: 'font-size:11.5px;padding:4px 10px', onclick: () => { input.value = x; input.focus(); } }, x)))),
+      thread,
       history.length ? h('div', { class: 'section-title' }, 'Tidigare frågor') : null,
-      history.map(q => h('div', { class: 'card tight' },
+      history.slice(0, 8).map(q => h('div', { class: 'card tight' },
         h('strong', { class: 'small' }, q.question),
-        h('div', { class: 'answer small', style: 'margin-top:6px;color:var(--ink-soft)' }, q.answer.length > 400 ? q.answer.slice(0, 400) + '…' : q.answer),
-        h('div', { class: 'muted', style: 'margin-top:6px' }, dt(q.asked_at) + ' · ' + (q.model || '')))));
+        h('div', { class: 'answer small', style: 'margin-top:6px;color:var(--ink-soft)' }, q.answer.length > 350 ? q.answer.slice(0, 350) + '…' : q.answer),
+        h('div', { class: 'tech', style: 'margin-top:6px' }, dt(q.asked_at) + ' · ' + (q.model || '')))));
   }
 
   // ---------- liquidity ----------
@@ -827,6 +902,248 @@
             h('td', {}, dt(a.at)), h('td', {}, a.action), h('td', { class: 'small' }, a.target || ''))))))));
   }
 
+  // ---------- Control Center ----------
+
+  async function settingsView() {
+    const data = await api('/settings');
+    let advanced = false;
+    let scope = ME.user.role === 'admin' ? 'org' : 'user';
+    const pending = {};
+    const wrap = h('div');
+
+    const CAT_LABELS = {
+      constitution: 'SYSTEM CONSTITUTION', general: 'GENERAL', intelligence: 'INTELLIGENCE',
+      guidance: 'GUIDANCE', reports: 'REPORTS', tone: 'TONE', notifications: 'NOTIFICATIONS / POLICY'
+    };
+    const CAT_ORDER = ['constitution', 'general', 'intelligence', 'guidance', 'reports', 'tone', 'notifications'];
+
+    function currentValue(key) {
+      if (key in pending) return pending[key];
+      const src = scope === 'user' ? data.effective : data.org;
+      return src[key] ? src[key].value : '';
+    }
+
+    function settingRow(def) {
+      const resolved = (scope === 'user' ? data.effective : data.org)[def.key];
+      const row = h('div', { class: 'setting-row' },
+        h('div', { style: 'display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap' },
+          h('div', {},
+            h('div', { class: 's-label' }, def.label),
+            h('div', { class: 's-desc' }, def.description)),
+          h('span', { class: 's-source' }, resolved ? resolved.source : 'default')));
+      if (def.type === 'select' && def.options) {
+        const cards = h('div', { class: 'opt-cards' },
+          def.options.map(o => {
+            const c = h('div', { class: 'opt-card' + (currentValue(def.key) === o.value ? ' selected' : ''), onclick: () => {
+              pending[def.key] = o.value;
+              cards.querySelectorAll('.opt-card').forEach(x => x.classList.remove('selected'));
+              c.classList.add('selected');
+            } },
+              h('div', { class: 'o-label' }, o.label),
+              h('div', { class: 'o-desc' }, o.description));
+            return c;
+          }));
+        row.append(cards);
+      } else {
+        const inp = def.type === 'number'
+          ? h('input', { type: 'number', step: 'any', value: currentValue(def.key), style: 'max-width:220px;margin-top:8px' })
+          : h('input', { type: 'text', value: currentValue(def.key), style: 'margin-top:8px' });
+        inp.addEventListener('input', () => { pending[def.key] = inp.value; });
+        row.append(inp);
+      }
+      return row;
+    }
+
+    function render() {
+      const cats = CAT_ORDER.map(cat => {
+        const defs = data.catalog.filter(d => d.category === cat && (advanced || !d.advanced));
+        if (!defs.length) return null;
+        return h('div', { class: 'card' },
+          h('div', { class: 'tech', style: 'margin-bottom:4px' }, CAT_LABELS[cat] || cat.toUpperCase()),
+          defs.map(settingRow));
+      });
+      const content = h('div', {},
+        h('div', { class: 'card tight' },
+          h('div', { style: 'display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center' },
+            h('div', { class: 'btnrow' },
+              h('button', { class: advanced ? 'ghost' : 'secondary', onclick: () => { advanced = false; render(); } }, 'Simple'),
+              h('button', { class: advanced ? 'secondary' : 'ghost', onclick: () => { advanced = true; render(); } }, 'Advanced')),
+            ME.user.role === 'admin' ? h('div', { class: 'btnrow' },
+              h('button', { class: scope === 'org' ? 'secondary' : 'ghost', onclick: () => { scope = 'org'; render(); } }, 'Organisation'),
+              h('button', { class: scope === 'user' ? 'secondary' : 'ghost', onclick: () => { scope = 'user'; render(); } }, 'Bara mig'))
+            : h('span', { class: 'tech' }, 'PERSONLIGA INSTÄLLNINGAR'))),
+        ME.user.role === 'admin' && scope === 'org' ? h('div', { class: 'card' },
+          h('div', { class: 'tech', style: 'margin-bottom:8px' }, 'PRESETS'),
+          h('div', { class: 'opt-cards' },
+            data.presets.map(p => h('div', { class: 'opt-card', onclick: async () => {
+              if (!confirm('Tillämpa preset "' + p.label + '" på organisationen?')) return;
+              await api('/settings/preset', { method: 'POST', body: { preset: p.key } });
+              toast('Preset tillämpad', true); route();
+            } },
+              h('div', { class: 'o-label' }, p.label),
+              h('div', { class: 'o-desc' }, p.description))))) : null,
+        cats,
+        h('div', { class: 'btnrow', style: 'margin-top:4px' },
+          h('button', { onclick: async () => {
+            if (!Object.keys(pending).length) { toast('Inga ändringar att spara', true); return; }
+            try {
+              await api('/settings', { method: 'PUT', body: { values: pending, scope } });
+              toast('Inställningar sparade (' + (scope === 'org' ? 'organisation' : 'personligt') + '). Alla ändringar auditloggas.', true);
+              route();
+            } catch (ex) { toast(ex.message); }
+          } }, 'Spara ändringar')));
+      wrap.replaceChildren(content);
+    }
+    render();
+
+    return h('div', {},
+      h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Kontrollcenter'),
+        h('div', { class: 'sub' }, 'Opinionated defaults, deep control. Bra standardinställningar — och djup konfigurerbarhet när du vill. Varje inställning förklarar sin konsekvens.'))),
+      wrap);
+  }
+
+  // ---------- Governance (Styrning) ----------
+
+  async function governanceView() {
+    const [docs, goals, units, risks] = await Promise.all([api('/documents'), api('/goals'), api('/units'), api('/risks')]);
+    const reviewBox = h('div');
+
+    async function openReview(docId, filename) {
+      const items = await api('/documents/' + docId + '/items');
+      reviewBox.replaceChildren(h('div', { class: 'card' },
+        h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'SYSTEMET HAR TOLKAT · ' + filename),
+        h('div', { class: 'muted', style: 'margin-bottom:10px' }, 'Granska varje post. Inget blir styrande utan godkännande.'),
+        items.length ? items.map(it => h('div', { class: 'evidence-item ' + (it.status === 'approved' ? 'fact' : 'derived') },
+          h('div', { class: 'e-label' }, it.kind.toUpperCase() + ' · ' + it.status),
+          h('div', { class: 'e-value', style: 'font-size:13px' }, it.payload.label || it.payload.title || it.payload.definition || '—'),
+          it.payload.target_value ? h('div', { class: 'e-src' }, 'Målvärde: ' + Number(it.payload.target_value).toLocaleString('sv-SE') + (it.payload.target_unit === '%' ? ' %' : ' kr') + (it.payload.period_start ? ' · ' + it.payload.period_start.slice(0, 4) : '')) : null,
+          it.status === 'proposed' ? h('div', { class: 'btnrow', style: 'margin-top:6px' },
+            h('button', { style: 'font-size:12px;padding:4px 12px', onclick: async () => { await api('/document-items/' + it.id + '/approve', { method: 'POST' }); toast('Godkänd och materialiserad', true); openReview(docId, filename); } }, 'Godkänn'),
+            h('button', { class: 'ghost', style: 'font-size:12px;padding:4px 12px', onclick: async () => { await api('/document-items/' + it.id + '/reject', { method: 'POST' }); openReview(docId, filename); } }, 'Avvisa')) : null))
+        : h('div', { class: 'empty' }, 'Inga poster kunde extraheras ur dokumentet.')));
+      reviewBox.scrollIntoView({ behavior: Motion.reduced ? 'auto' : 'smooth' });
+    }
+
+    const fileInput = h('input', { type: 'file', accept: '.txt,.md,.csv,.xlsx', style: 'display:none' });
+    const pasteArea = h('textarea', { placeholder: 'Eller klistra in text ur verksamhetsplan / ledningsgenomgång här…' });
+    const kindSel = h('select', {},
+      h('option', { value: 'verksamhetsplan' }, 'Verksamhetsplan'),
+      h('option', { value: 'ledningsgenomgang' }, 'Ledningsgenomgång'),
+      h('option', { value: 'budget' }, 'Budget'),
+      h('option', { value: 'policy' }, 'Policy'),
+      h('option', { value: 'other' }, 'Övrigt'));
+
+    async function uploadDoc(filename, content, contentBase64) {
+      try {
+        const r = await api('/documents', { method: 'POST', body: { filename, kind: kindSel.value, content, content_base64: contentBase64 } });
+        const parts = Object.entries(r.counts).map(([k, v]) => v + ' ' + k).join(', ');
+        toast('Jag hittade: ' + (parts || 'inga styrobjekt') + '. Granska nedan.', true);
+        await openReview(r.documentId, filename);
+      } catch (ex) { toast(ex.message); }
+    }
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let bin = ''; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      await uploadDoc(file.name, null, btoa(bin));
+    });
+
+    function unitNode(n, depth) {
+      return [h('div', { class: 'unit-node', style: 'padding-left:' + depth * 18 + 'px' },
+        (depth ? '└ ' : '') + n.name, h('span', { class: 'u-kind' }, n.kind)),
+        ...n.children.flatMap(c => unitNode(c, depth + 1))];
+    }
+    const flatUnits = [];
+    (function flatten(list) { list.forEach(n => { flatUnits.push(n); flatten(n.children); }); })(units.tree);
+
+    return h('div', {},
+      h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Styrning'),
+        h('div', { class: 'sub' }, 'Organisationens styrande verklighet: dokument, mål, struktur och risker. Först avsikten — sedan mäts verkligheten mot den.'))),
+
+      h('div', { class: 'card' },
+        h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'STYRANDE DOKUMENT'),
+        h('div', { class: 'muted', style: 'margin-bottom:10px' }, 'Ladda upp verksamhetsplan, ledningsgenomgång eller budget (TXT/MD/CSV/XLSX eller inklistrad text). Systemet extraherar mål, KPI:er, risker, beslut och åtgärder — du godkänner varje post.'),
+        h('div', { class: 'grid two' },
+          h('div', {},
+            h('label', { class: 'fld' }, h('span', {}, 'Dokumenttyp'), kindSel),
+            h('div', { class: 'btnrow' },
+              h('button', { onclick: () => fileInput.click() }, 'Välj fil'),
+              h('button', { class: 'secondary', onclick: () => {
+                const text = pasteArea.value.trim();
+                if (text.length < 20) { toast('Klistra in mer text först'); return; }
+                uploadDoc('inklistrad-text.txt', text, null);
+              } }, 'Tolka inklistrad text')),
+            fileInput),
+          pasteArea),
+        docs.length ? h('div', { style: 'margin-top:12px' },
+          h('div', { class: 'tech', style: 'margin-bottom:4px' }, 'IMPORTERADE DOKUMENT'),
+          docs.map(d => h('div', { class: 'timeline-item', style: 'cursor:pointer', onclick: () => openReview(d.id, d.filename) },
+            h('span', { class: 't-date' }, d10(d.uploaded_at)),
+            h('span', {}, d.filename + ' · ' + (d.kind || '') + ' · ' + d.item_count + ' poster '),
+            h('span', { class: 'tech' }, (d.extraction_model || '').toUpperCase())))) : null),
+      reviewBox,
+
+      h('div', { class: 'card' },
+        h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'MÅL'),
+        goals.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
+          h('thead', {}, h('tr', {}, h('th', {}, 'Mål'), h('th', {}, 'Metric'), h('th', { class: 'num' }, 'Målvärde'), h('th', {}, 'Period'), h('th', {}, 'Källa'), h('th', {}, ''))),
+          h('tbody', {}, goals.filter(g => g.period !== 'monthly').map(g => h('tr', {},
+            h('td', {}, g.label),
+            h('td', {}, h('code', { class: 'inline' }, g.metric || g.key)),
+            h('td', { class: 'num' }, Number(g.target_value).toLocaleString('sv-SE')),
+            h('td', {}, g.period + (g.period_start ? ' ' + g.period_start.slice(0, 4) : '')),
+            h('td', { class: 'small' }, g.source === 'document' ? 'Styrande dokument' : g.source === 'breakdown' ? 'Nedbrutet' : 'Manuellt'),
+            h('td', {}, g.period === 'yearly' ? h('button', { class: 'ghost', style: 'font-size:11.5px;padding:3px 10px', onclick: async () => {
+              const r = await api('/goals/' + g.id + '/breakdown', { method: 'POST' });
+              toast(r.created ? r.created + ' månadsmål skapade' : 'Redan nedbrutet', true); route();
+            } }, 'Bryt ner → månader') : null))))))
+        : h('div', { class: 'empty' }, 'Inga mål registrerade. Skapa nedan eller importera ett styrande dokument.'),
+        h('div', { class: 'hairline' }),
+        h('form', { onsubmit: async e => {
+          e.preventDefault(); const fd = new FormData(e.target);
+          try {
+            await api('/goals', { method: 'POST', body: { label: fd.get('label'), metric: fd.get('metric'), target_value: Number(fd.get('target_value')), period: 'yearly', year: fd.get('year') } });
+            toast('Mål skapat', true); route();
+          } catch (ex) { toast(ex.message); }
+        } },
+          h('div', { class: 'grid two' },
+            h('label', { class: 'fld' }, h('span', {}, 'Mål (t.ex. "Omsättning 2026")'), h('input', { name: 'label', required: '' })),
+            h('label', { class: 'fld' }, h('span', {}, 'Metric'), h('select', { name: 'metric' },
+              h('option', { value: 'revenue' }, 'Omsättning'), h('option', { value: 'margin' }, 'Marginal'),
+              h('option', { value: 'liquidity' }, 'Likviditet'), h('option', { value: 'costs' }, 'Kostnader'),
+              h('option', { value: 'other' }, 'Övrigt'))),
+            h('label', { class: 'fld' }, h('span', {}, 'Målvärde (kr/år)'), h('input', { name: 'target_value', type: 'number', required: '' })),
+            h('label', { class: 'fld' }, h('span', {}, 'År'), h('input', { name: 'year', type: 'number', value: new Date().getFullYear() }))),
+          h('button', {}, 'Skapa årsmål'))),
+
+      h('div', { class: 'grid two' },
+        h('div', { class: 'card' },
+          h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'ORGANISATIONSSTRUKTUR'),
+          units.tree.length ? units.tree.flatMap(n => unitNode(n, 0)) : h('div', { class: 'empty' }, 'Inga enheter.'),
+          ME.user.role === 'admin' ? h('form', { style: 'margin-top:10px', onsubmit: async e => {
+            e.preventDefault(); const fd = new FormData(e.target);
+            try { await api('/units', { method: 'POST', body: { name: fd.get('name'), kind: fd.get('kind'), parent_id: fd.get('parent_id') || null } }); toast('Enhet skapad', true); route(); }
+            catch (ex) { toast(ex.message); }
+          } },
+            h('label', { class: 'fld' }, h('span', {}, 'Ny enhet'), h('input', { name: 'name', required: '' })),
+            h('div', { class: 'grid two' },
+              h('label', { class: 'fld' }, h('span', {}, 'Typ'), h('select', { name: 'kind' },
+                units.kinds.map(k => h('option', { value: k }, k)))),
+              h('label', { class: 'fld' }, h('span', {}, 'Överordnad'), h('select', { name: 'parent_id' },
+                h('option', { value: '' }, '— ingen (toppnivå) —'),
+                flatUnits.map(u => h('option', { value: u.id }, u.name))))),
+            h('button', { class: 'secondary' }, 'Lägg till')) : null),
+        h('div', { class: 'card' },
+          h('div', { class: 'tech', style: 'margin-bottom:6px' }, 'RISKER'),
+          risks.length ? risks.map(r => h('div', { class: 'timeline-item' },
+            h('span', { class: 'tag ' + (r.severity === 'high' ? 'high' : r.severity === 'medium' ? 'medium' : 'low') }, r.severity),
+            h('div', {}, h('strong', { class: 'small' }, r.title),
+              r.description && r.description !== r.title ? h('div', { class: 'muted' }, r.description) : null)))
+          : h('div', { class: 'empty' }, 'Inga registrerade risker.'))));
+  }
+
   // ---------- router ----------
 
   const routes = [
@@ -838,6 +1155,8 @@
     { re: /^#\/actions$/, view: actionsView },
     { re: /^#\/reports$/, view: reportsView },
     { re: /^#\/alerts$/, view: alertsView },
+    { re: /^#\/settings$/, view: settingsView },
+    { re: /^#\/governance$/, view: governanceView },
     { re: /^#\/integrations$/, view: integrationsView },
     { re: /^#\/profile$/, view: profileView },
     { re: /^#\/admin$/, view: adminView }

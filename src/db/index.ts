@@ -19,12 +19,37 @@ function schemaSql(): string {
   throw new Error('schema.sql not found');
 }
 
+// Additive migrations for columns on existing tables. Each runs once;
+// failures for already-applied changes are ignored.
+const MIGRATIONS: string[] = [
+  "ALTER TABLE business_units ADD COLUMN parent_id TEXT",
+  "ALTER TABLE users ADD COLUMN unit_id TEXT",
+  "ALTER TABLE users ADD COLUMN responsibilities TEXT",
+  "ALTER TABLE goals ADD COLUMN metric TEXT",
+  "ALTER TABLE goals ADD COLUMN period_start TEXT",
+  "ALTER TABLE goals ADD COLUMN period_end TEXT",
+  "ALTER TABLE goals ADD COLUMN parent_goal_id TEXT",
+  "ALTER TABLE goals ADD COLUMN owner TEXT",
+  "ALTER TABLE goals ADD COLUMN source TEXT",
+  "ALTER TABLE goals ADD COLUMN source_document_id TEXT",
+  "ALTER TABLE goals ADD COLUMN status TEXT DEFAULT 'active'",
+  "ALTER TABLE decisions ADD COLUMN source_document_id TEXT",
+  "ALTER TABLE actions ADD COLUMN source_document_id TEXT"
+];
+
+function applyMigrations(d: DatabaseSync): void {
+  for (const m of MIGRATIONS) {
+    try { d.exec(m); } catch { /* column already exists */ }
+  }
+}
+
 export function getDb(): DatabaseSync {
   if (!db) {
     db = new DatabaseSync(config.dbFile);
     db.exec('PRAGMA journal_mode = WAL;');
     db.exec('PRAGMA foreign_keys = ON;');
     db.exec(schemaSql());
+    applyMigrations(db);
   }
   return db;
 }
@@ -34,6 +59,7 @@ export function openTestDb(file: string): DatabaseSync {
   db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec(schemaSql());
+  applyMigrations(db);
   return db;
 }
 

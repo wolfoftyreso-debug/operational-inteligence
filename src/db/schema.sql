@@ -322,6 +322,60 @@ CREATE TABLE IF NOT EXISTS questions (
   asked_at TEXT NOT NULL
 );
 
+-- Hierarchical configuration: org defaults + user overrides.
+-- Resolution order: user → org → system default (in code).
+CREATE TABLE IF NOT EXISTS settings (
+  org_id TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'org',   -- org|user (unit/role prepared for later)
+  scope_id TEXT NOT NULL DEFAULT '',   -- user id when scope='user'
+  key TEXT NOT NULL,
+  value TEXT,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT,
+  PRIMARY KEY (org_id, scope, scope_id, key)
+);
+
+-- Governing documents (verksamhetsplan, ledningsgenomgång, budget...).
+CREATE TABLE IF NOT EXISTS documents (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  kind TEXT,                     -- verksamhetsplan|ledningsgenomgang|budget|policy|other
+  text_content TEXT NOT NULL,
+  uploaded_by TEXT,
+  uploaded_at TEXT NOT NULL,
+  extraction_model TEXT,
+  item_count INTEGER DEFAULT 0
+);
+
+-- Structured objects extracted from documents, pending review.
+-- On approval they materialize into goals/risks/decisions/actions.
+CREATE TABLE IF NOT EXISTS document_items (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  document_id TEXT NOT NULL REFERENCES documents(id),
+  kind TEXT NOT NULL,            -- goal|kpi|risk|decision|action|observation
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'proposed', -- proposed|approved|rejected
+  materialized_id TEXT,
+  reviewed_by TEXT,
+  reviewed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS risks (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT,
+  severity TEXT DEFAULT 'medium',
+  owner TEXT,
+  status TEXT NOT NULL DEFAULT 'active',  -- active|mitigated|closed
+  unit_id TEXT,
+  source TEXT,
+  source_document_id TEXT,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id TEXT PRIMARY KEY,
   org_id TEXT,

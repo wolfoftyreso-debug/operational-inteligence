@@ -4,6 +4,7 @@
 import { all } from '../db';
 import type { LiquidityForecast, LiquidityWeek } from '../domain/types';
 import { getProfile, profileNumber, round2 } from './metrics';
+import { getSettingNumber } from '../core/settings';
 
 function weekStart(date: Date): string {
   const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
@@ -13,7 +14,7 @@ function weekStart(date: Date): string {
 }
 
 export function computeLiquidity(orgId: string, opts: { weeks?: number; asOf?: string } = {}): LiquidityForecast {
-  const nWeeks = opts.weeks ?? 13;
+  const nWeeks = opts.weeks ?? (getSettingNumber(orgId, 'intelligence.forecast_horizon_weeks') || 13);
   const asOf = opts.asOf ? new Date(opts.asOf + 'T00:00:00Z') : new Date();
   const profile = getProfile(orgId);
   const startBalance = profileNumber(profile, 'cash_position');

@@ -20,6 +20,10 @@ import { ingestCsvContent } from '../connectors/csv';
 import { ingestExcelContent } from '../connectors/excel';
 import { fortnoxAuthorizeUrl, fortnoxExchangeCode } from '../connectors/fortnox';
 import type { FindingRow, Role } from '../domain/types';
+import { SETTINGS_CATALOG, PRESETS, resolveAll, setSetting, applyPreset, getSettingNumber } from '../core/settings';
+import { unitTree, createUnit, listGoals, createGoal, breakdownGoal, managementContext, UNIT_KINDS } from '../core/hierarchy';
+import { ingestDocument, listDocuments, listDocumentItems, approveItem, rejectItem } from '../ingest/documents';
+import { morningBrief } from '../reasoning';
 
 export const router = Router();
 
@@ -139,16 +143,60 @@ router.get('/status', requireAuth, (req: Request, res: Response) => {
     orgId, ...sevs
   );
   const unread = get<{ cnt: number }>('SELECT COUNT(*) as cnt FROM alerts WHERE org_id = ? AND read_at IS NULL', orgId);
+  // Policy: findings below the configured confidence floor are hidden here
+  // (they remain stored and inspectable in the findings view with status=all).
+  const minConf = getSettingNumber(orgId, 'intelligence.min_confidence', req.user!.id) || 0.5;
+  const visible = findings.filter(f => f.confidence >= minConf || f.category === 'coverage');
+  const sources = all<{ id: string; name: string; connector_key: string; last_sync_at: string | null }>(
+    "SELECT id, name, connector_key, last_sync_at FROM data_sources WHERE org_id = ? AND status != 'disconnected'", orgId);
   res.json({
     overall_status: runInfo?.overall_status ?? computeOverallStatus(findings),
     summary: runInfo?.summary ?? null,
     narrative: runInfo?.narrative ?? null,
     narrative_model: runInfo?.narrative_model ?? null,
     last_analysis_at: runInfo?.finished_at ?? null,
-    findings: findings.map(mapFinding),
+    findings: visible.map(mapFinding),
+    hidden_low_confidence: findings.length - visible.length,
     unread_alerts: unread?.cnt ?? 0,
-    role: req.user!.role
+    role: req.user!.role,
+    sources: sources.length,
+    last_sync_at: sources.map(s => s.last_sync_at).filter(Boolean).sort().pop() ?? null
   });
+});
+
+// "What changed" — a composed feed of recent system-observed events.
+router.get('/changes', requireAuth, (req: Request, res: Response) => {
+  const orgId = req.user!.org_id;
+  const items: { at: string; kind: string; text: string; ref?: string }[] = [];
+  for (const f of all<{ id: string; detected_at: string; title: string; severity: string }>(
+    "SELECT id, detected_at, title, severity FROM findings WHERE org_id = ? AND severity != 'info' ORDER BY detected_at DESC LIMIT 8", orgId)) {
+    items.push({ at: f.detected_at, kind: 'finding', text: f.title, ref: f.id });
+  }
+  for (const s of all<{ finished_at: string | null; status: string; source_id: string }>(
+    'SELECT finished_at, status, source_id FROM sync_runs WHERE org_id = ? AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 4', orgId)) {
+    const src = get<{ name: string }>('SELECT name FROM data_sources WHERE id = ?', s.source_id);
+    items.push({ at: s.finished_at!, kind: 'sync', text: `${src?.name ?? 'Datakälla'} synkroniserad (${s.status})` });
+  }
+  for (const d of all<{ decided_at: string; title: string }>(
+    'SELECT decided_at, title FROM decisions WHERE org_id = ? ORDER BY decided_at DESC LIMIT 3', orgId)) {
+    items.push({ at: d.decided_at, kind: 'decision', text: `Beslut: ${d.title}` });
+  }
+  for (const a of all<{ completed_at: string; title: string }>(
+    "SELECT completed_at, title FROM actions WHERE org_id = ? AND completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT 3", orgId)) {
+    items.push({ at: a.completed_at, kind: 'action', text: `Åtgärd genomförd: ${a.title}` });
+  }
+  items.sort((a, b) => b.at.localeCompare(a.at));
+  res.json(items.slice(0, 12));
+});
+
+// Morning brief — the chat's landing surface.
+router.get('/brief', requireAuth, (req: Request, res: Response) => {
+  res.json(morningBrief(req.user!.org_id, req.user!.id));
+});
+
+// Personal management context.
+router.get('/context', requireAuth, (req: Request, res: Response) => {
+  res.json(managementContext(req.user!.org_id, req.user!.id));
 });
 
 router.get('/metrics', requireAuth, (req: Request, res: Response) => {
@@ -458,6 +506,126 @@ router.get('/connect/fortnox/start', requireAdmin, (req: Request, res: Response)
   const cfg = { oauth_state: state };
   makeContext(src).saveConfig(cfg);
   res.json({ url: fortnoxAuthorizeUrl(`${src.id}.${state}`) });
+});
+
+// ---------------------------------------------------------------------------
+// Control Center — settings with org defaults + user overrides
+// ---------------------------------------------------------------------------
+
+router.get('/settings', requireAuth, (req: Request, res: Response) => {
+  res.json({
+    catalog: SETTINGS_CATALOG,
+    presets: PRESETS.map(p => ({ key: p.key, label: p.label, description: p.description })),
+    org: resolveAll(req.user!.org_id),
+    effective: resolveAll(req.user!.org_id, req.user!.id)
+  });
+});
+
+router.put('/settings', requireAuth, (req: Request, res: Response) => {
+  const { values, scope } = req.body ?? {};
+  const targetScope = scope === 'user' ? 'user' : 'org';
+  if (targetScope === 'org' && req.user!.role !== 'admin') return bad(res, 'Organisationsinställningar kräver administratörsroll', 403);
+  const validKeys = new Set(SETTINGS_CATALOG.map(s => s.key));
+  const applied: string[] = [];
+  for (const [key, value] of Object.entries(values ?? {})) {
+    if (!validKeys.has(key)) continue;
+    setSetting(req.user!.org_id, key, String(value ?? ''), targetScope, req.user!.id, req.user!.id);
+    applied.push(key);
+  }
+  audit(req.user!.org_id, req.user!.id, 'settings.updated', targetScope, { keys: applied });
+  res.json({ ok: true, applied });
+});
+
+router.post('/settings/preset', requireAdmin, (req: Request, res: Response) => {
+  const { preset } = req.body ?? {};
+  if (!applyPreset(req.user!.org_id, String(preset), req.user!.id)) return bad(res, 'Okänd preset');
+  audit(req.user!.org_id, req.user!.id, 'settings.preset_applied', String(preset));
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Governance: units, goals, documents, risks
+// ---------------------------------------------------------------------------
+
+router.get('/units', requireAuth, (req: Request, res: Response) => {
+  res.json({ tree: unitTree(req.user!.org_id), kinds: UNIT_KINDS });
+});
+
+router.post('/units', requireAdmin, (req: Request, res: Response) => {
+  const { name, kind, parent_id } = req.body ?? {};
+  if (!name) return bad(res, 'name krävs');
+  const id = createUnit(req.user!.org_id, String(name), String(kind || 'unit'), parent_id || null);
+  audit(req.user!.org_id, req.user!.id, 'unit.created', id, { name, kind, parent_id });
+  res.json({ ok: true, id });
+});
+
+router.post('/users/:id/scope', requireAdmin, (req: Request, res: Response) => {
+  const { unit_id, responsibilities } = req.body ?? {};
+  run('UPDATE users SET unit_id = ?, responsibilities = ? WHERE id = ? AND org_id = ?',
+    unit_id || null, responsibilities || null, req.params.id, req.user!.org_id);
+  audit(req.user!.org_id, req.user!.id, 'user.scope', req.params.id, { unit_id });
+  res.json({ ok: true });
+});
+
+router.get('/goals', requireAuth, (req: Request, res: Response) => {
+  res.json(listGoals(req.user!.org_id));
+});
+
+router.post('/goals', requireAuth, (req: Request, res: Response) => {
+  const { label, metric, target_value, period, year, unit_id, owner } = req.body ?? {};
+  if (!label || !target_value) return bad(res, 'label och target_value krävs');
+  const y = String(year || new Date().getFullYear());
+  const id = createGoal(req.user!.org_id, {
+    label: String(label), metric: String(metric || 'revenue'), target_value: Number(target_value),
+    period: (period === 'monthly' || period === 'quarterly') ? period : 'yearly',
+    period_start: `${y}-01-01`, period_end: `${y}-12-31`,
+    unit_id: unit_id || null, owner: owner || req.user!.name, source: 'manual'
+  });
+  audit(req.user!.org_id, req.user!.id, 'goal.created', id, { label });
+  res.json({ ok: true, id });
+});
+
+router.post('/goals/:id/breakdown', requireAuth, (req: Request, res: Response) => {
+  const created = breakdownGoal(req.user!.org_id, req.params.id);
+  audit(req.user!.org_id, req.user!.id, 'goal.breakdown', req.params.id, { created });
+  res.json({ ok: true, created });
+});
+
+router.get('/documents', requireAuth, (req: Request, res: Response) => {
+  res.json(listDocuments(req.user!.org_id));
+});
+
+router.post('/documents', requireAuth, async (req: Request, res: Response) => {
+  const { filename, kind, content, content_base64 } = req.body ?? {};
+  if (!filename) return bad(res, 'filename krävs');
+  try {
+    const result = await ingestDocument(req.user!.org_id, req.user!.id, { filename, kind, content, content_base64 });
+    audit(req.user!.org_id, req.user!.id, 'document.ingested', result.documentId, { filename, counts: result.counts });
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    bad(res, String(e instanceof Error ? e.message : e));
+  }
+});
+
+router.get('/documents/:id/items', requireAuth, (req: Request, res: Response) => {
+  res.json(listDocumentItems(req.user!.org_id, req.params.id));
+});
+
+router.post('/document-items/:id/approve', requireAuth, (req: Request, res: Response) => {
+  const materialized = approveItem(req.user!.org_id, req.params.id, req.user!.id);
+  if (materialized === null) return bad(res, 'Posten kan inte godkännas (redan granskad?)');
+  audit(req.user!.org_id, req.user!.id, 'document_item.approved', req.params.id);
+  res.json({ ok: true, materialized_id: materialized });
+});
+
+router.post('/document-items/:id/reject', requireAuth, (req: Request, res: Response) => {
+  if (!rejectItem(req.user!.org_id, req.params.id, req.user!.id)) return bad(res, 'Posten kan inte avvisas');
+  audit(req.user!.org_id, req.user!.id, 'document_item.rejected', req.params.id);
+  res.json({ ok: true });
+});
+
+router.get('/risks', requireAuth, (req: Request, res: Response) => {
+  res.json(all("SELECT * FROM risks WHERE org_id = ? AND status = 'active' ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END", req.user!.org_id));
 });
 
 // ---------------------------------------------------------------------------

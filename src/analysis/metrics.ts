@@ -3,6 +3,7 @@
 
 import { all, get } from '../db';
 import type { MetricPack, MonthPoint } from '../domain/types';
+import { getSettingNumber } from '../core/settings';
 
 function monthOf(date: string): string {
   return date.slice(0, 7);
@@ -27,7 +28,7 @@ export function round2(n: number): number {
 }
 
 export function computeMetrics(orgId: string, opts: { months?: number; asOf?: string } = {}): MetricPack {
-  const nMonths = opts.months ?? 13;
+  const nMonths = opts.months ?? (getSettingNumber(orgId, 'intelligence.history_months') || 13);
   const asOf = opts.asOf ?? new Date().toISOString().slice(0, 10);
 
   const txs = all<{ date: string; amount: number; kind: string; category: string | null; unit_id: string | null }>(

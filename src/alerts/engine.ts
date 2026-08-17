@@ -6,12 +6,15 @@ import { all, get, run, uuid, now } from '../db';
 import type { FindingRow, Severity } from '../domain/types';
 import { severityAtLeast } from '../domain/types';
 import { deliver, type Channel } from './channels';
+import { quietCategories } from '../core/settings';
 
 const ALERT_MIN_SEVERITY: Severity = 'high';
 const DEDUPE_DAYS = 7;
 
 export function dispatchAlertsForFinding(f: FindingRow): void {
   if (!severityAtLeast(f.severity, ALERT_MIN_SEVERITY)) return;
+  // Policy: categories the organization has silenced never generate alerts.
+  if (quietCategories(f.org_id).has(f.category)) return;
 
   // Spam protection: no repeat alert for the same underlying problem within the window.
   const cutoff = new Date(Date.now() - DEDUPE_DAYS * 86400000).toISOString();

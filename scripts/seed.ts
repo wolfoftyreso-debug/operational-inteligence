@@ -3,11 +3,13 @@
 // connector pipeline so the entire vertical slice is exercised:
 // data → normalization → analysis → findings → evidence → alerts.
 
-import { getDb, get, run, uuid, now, today } from '../src/db';
+import { getDb, get, all, run, uuid, now, today } from '../src/db';
 import { hashPassword, randomToken } from '../src/core/crypto';
 import { createDataSource, makeContext } from '../src/connectors/registry';
 import { ingestCsvContent } from '../src/connectors/csv';
 import { runAnalysis } from '../src/analysis/engine';
+import { createUnit, createGoal, breakdownGoal } from '../src/core/hierarchy';
+import { ingestDocument, approveItem } from '../src/ingest/documents';
 
 const DEMO_EMAIL = 'demo@verkstad.se';
 const DEMO_PASSWORD = 'demo1234!';
@@ -70,6 +72,39 @@ async function main(): Promise<void> {
 
   run('INSERT INTO observations (id, org_id, user_id, date, category, text, created_at) VALUES (?,?,?,?,?,?,?)',
     uuid(), orgId, adminId, today(), 'personal', 'En erfaren tekniker på Verkstad Syd slutar i slutet av nästa månad.', now());
+
+  // Organizational structure (lasagne layer 2): company → facilities → departments.
+  const companyUnit = createUnit(orgId, 'Demo Verkstad AB', 'company', null);
+  const nordId = createUnit(orgId, 'Verkstad Nord', 'facility', companyUnit);
+  const sydId = createUnit(orgId, 'Verkstad Syd', 'facility', companyUnit);
+  createUnit(orgId, 'Reservdelar', 'department', nordId);
+  createUnit(orgId, 'Kundmottagning', 'department', sydId);
+  run('UPDATE users SET unit_id = NULL, responsibilities = ? WHERE id = ?', 'Hela verksamheten: resultat, likviditet, strategi.', ceoId);
+
+  // Governance layer: annual revenue goal, broken down to monthly targets.
+  const year = new Date().getFullYear();
+  const annualGoal = createGoal(orgId, {
+    label: `Omsättning ${year}`, metric: 'revenue', target_value: 17400000,
+    period: 'yearly', period_start: `${year}-01-01`, period_end: `${year}-12-31`,
+    owner: 'Kim VD', source: 'manual'
+  });
+  breakdownGoal(orgId, annualGoal);
+
+  // Governing document through the extraction pipeline (reviewed & approved).
+  const planText = [
+    `Verksamhetsplan ${year} — Demo Verkstad AB`,
+    `Marginalen ska öka till 12 % under ${year}.`,
+    'Kundnöjdheten ska överstiga 90 %.',
+    'Risk: Beroendet av två stora företagskunder är en väsentlig risk för kassaflödet.',
+    'Risk: Kompetensbrist på erfarna tekniker riskerar att begränsa kapaciteten.',
+    'Ledningen beslutade att införa månatlig genomgång av faktureringsgraden per anläggning.',
+    'Åtgärd: Ta fram bemanningsplan för hösten. Ansvarig: Maria Sjö.'
+  ].join('\n');
+  const doc = await ingestDocument(orgId, adminId, { filename: `verksamhetsplan-${year}.txt`, kind: 'verksamhetsplan', content: planText });
+  for (const item of all<{ id: string }>('SELECT id FROM document_items WHERE document_id = ?', doc.documentId)) {
+    approveItem(orgId, item.id, adminId);
+  }
+  console.log('Styrande dokument tolkat:', JSON.stringify(doc.counts));
 
   // Data source: CSV connector (the real ingest pipeline)
   const src = createDataSource(orgId, 'csv', 'Ekonomiexport (CSV)', {});

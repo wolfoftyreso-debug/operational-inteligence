@@ -5,11 +5,53 @@ Ett intelligent lednings- och vägledningslager ovanpå verksamhetens befintliga
 > **System of understanding & system of guidance — inte system of record.**
 > Fortnox fortsätter vara Fortnox. Visma fortsätter vara Visma. Det här systemet samlar in, normaliserar, analyserar, bedömer, rekommenderar och följer upp.
 
-Kärnprincipen genom hela kodbasen:
+Kärnprinciper genom hela kodbasen:
 
 ```
 DATA → UNDERSTANDING → ASSESSMENT → GUIDANCE → FEEDBACK
+ONE BUSINESS → ONE REALITY MODEL → MANY MANAGEMENT VIEWS
 ```
+
+## Arkitekturprinciper (tillägg v0.2)
+
+**Organizational Context Graph.** Enhetshierarki (company → business unit →
+facility → department → team) med scopes per användare, mål som förstklassiga
+styrobjekt med arv (årsmål → månadsmål via nedbrytning), och styrande dokument
+som källa. Analysen mäter verkligheten mot avsikten: omsättningsregeln hämtar
+plan från aktivt mål i målgrafen (källan redovisas i evidensen), med
+verksamhetsprofilen som fallback.
+
+**Styrande dokument.** Verksamhetsplan/ledningsgenomgång/budget laddas upp
+(TXT/MD/CSV/XLSX eller inklistrad text). Systemet extraherar mål, KPI:er,
+risker, beslut och åtgärder — LLM när konfigurerad, deterministisk heuristik
+annars — och **inget blir styrande utan granskning och godkännande**.
+
+**Opinionated Defaults, Deep Control.** Kontrollcenter med kategorierna
+General / Intelligence / Guidance / Reports / Tone / Notifications samt
+**System Constitution** (primary objective, risk tolerance, management style,
+alert philosophy, reporting philosophy) som injiceras i reasoning-prompten.
+Varje inställning förklarar sin konsekvens i ord (Conservative/Balanced/More
+sensitive — aldrig en oförklarad slider). Presets (Recommended, Executive,
+Operational, Financial, Compliance-nära, Full Intelligence), Simple/Advanced-
+läge, org-defaults + användar-overrides (unit/roll-nivå förberedd i modellen),
+suppressionspolicy ("ignorera variationer under X %", tysta kategorier) som
+faktiskt styr analys- och alertmotorn. Alla ändringar auditloggas.
+
+**Chat-pipeline med sanningsmodell.** "Fråga verksamheten" är ett
+huvudgränssnitt: fråga → intentklassificering → entitets-/datahämtning →
+deterministiska beräkningar → evidenspaket → språkmodell (eller deterministisk
+kompositör) → svar med evidenslåda. Chatten, dashboarden, rapporterna och
+alerts är olika presentationer av samma underliggande verklighetsmodell.
+Morgonbriefen landar i chatten ("God morgon. N saker förtjänar din
+uppmärksamhet.").
+
+**Industrial Precision + informationell motion.** Ljust, neutralt till 90–95 %,
+färg med semantisk vikt, monospace för tekniska etiketter (LIVE, SYNCED,
+CONFIDENCE, N SOURCES), hairlines i stället för dekor. Motion är funktionell:
+KPI:er räknas upp (~650 ms), grafer ritas in (~850 ms), findings materialiseras
+sekventiellt vid första viewport-kontakt (IntersectionObserver, play-once,
+`prefers-reduced-motion` respekteras). Det ska kännas som att systemet redan
+har gjort jobbet och avslöjar resultatet — aldrig som en presentation.
 
 ## Kom igång
 
