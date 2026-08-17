@@ -1,0 +1,28 @@
+{
+  "name": "operational-intelligence",
+  "version": "0.1.0-beta",
+  "description": "Operational Intelligence — system of understanding & guidance ovanpå verksamhetens befintliga system",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --no-warnings dist/src/index.js",
+    "dev": "tsx src/index.ts",
+    "seed": "node --no-warnings dist/scripts/seed.js",
+    "analyze": "node --no-warnings dist/scripts/analyze.js",
+    "test": "npm run build && node --no-warnings --test \"dist/tests/*.test.js\""
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
