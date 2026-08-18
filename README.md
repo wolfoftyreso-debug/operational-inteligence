@@ -1,5 +1,7 @@
 # Operational Intelligence — beta
 
+> **Kodagenter:** projektets instruktionsfil är [`AGENTS.md`](AGENTS.md) i repo-roten. Läs den först.
+
 **Ett företags operativsystem för människor som inte vill vara företagsledare.**
 Elektrikern vill vara elektriker. Verkstadsägaren vill driva verkstad. Systemet
 tar företagets fragmenterade information och hjälper ägaren fatta bättre beslut
